@@ -1,0 +1,1640 @@
+console.log('InstagramPro content script loaded on', window.location.href);
+
+class InstagramAutomation {
+  constructor() {
+    this.isRunning = false;
+    this.runToken = 0;
+    this.currentMode = 'posts';
+    this.settings = {};
+    this.advancedSettings = {};
+    this.sessionId = null;
+    this.targetUsername = null;
+    this.searchIndex = 0;
+    this.searchTotal = 0;
+    this.processedItems = new Set();
+    this.currentReelState = null;
+    this.stats = {
+      scrolls: 0,
+      likes: 0,
+      follows: 0,
+      scraped: 0,
+      dailyLikes: 0,
+      dailyFollows: 0,
+      sessionStartTime: null,
+      lastResetDate: new Date().toDateString(),
+    };
+
+    chrome.storage.local.get(['stats'], (result) => {
+      const stored = result?.stats && typeof result.stats === 'object' ? result.stats : null;
+      if (!stored) {
+        return;
+      }
+
+      this.stats = {
+        ...this.stats,
+        ...stored,
+        scrolls: Number.isFinite(Number(stored.scrolls)) ? Number(stored.scrolls) : this.stats.scrolls,
+        likes: Number.isFinite(Number(stored.likes)) ? Number(stored.likes) : this.stats.likes,
+        follows: Number.isFinite(Number(stored.follows)) ? Number(stored.follows) : this.stats.follows,
+        scraped: Number.isFinite(Number(stored.scraped)) ? Number(stored.scraped) : this.stats.scraped,
+        dailyLikes: Number.isFinite(Number(stored.dailyLikes)) ? Number(stored.dailyLikes) : this.stats.dailyLikes,
+        dailyFollows: Number.isFinite(Number(stored.dailyFollows)) ? Number(stored.dailyFollows) : this.stats.dailyFollows,
+        lastResetDate: stored.lastResetDate || this.stats.lastResetDate,
+      };
+    });
+  }
+
+  randomBetween(min, max) {
+    return Math.round(min + Math.random() * (max - min));
+  }
+
+  async wait(min, max = min) {
+    const delay = this.randomBetween(min, max);
+    return new Promise((resolve) => setTimeout(resolve, delay));
+  }
+
+  getStorage(keys) {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(keys, (result) => resolve(result || {}));
+    });
+  }
+
+  sendMessage(message) {
+    try {
+      chrome.runtime.sendMessage(message);
+    } catch (error) {
+      console.warn('Failed to send runtime message:', error);
+    }
+  }
+
+  sendStatusMessage(message) {
+    console.log('[Status]', message);
+    this.sendMessage({
+      type: 'STATUS_MESSAGE',
+      message,
+    });
+  }
+
+  updateStats() {
+    chrome.storage.local.set({ stats: this.stats });
+    this.sendMessage({
+      type: 'STATS_UPDATE',
+      stats: this.stats,
+    });
+  }
+
+  resetSessionStats() {
+    this.stats.scrolls = 0;
+    this.stats.likes = 0;
+    this.stats.follows = 0;
+    this.stats.scraped = 0;
+    this.stats.sessionStartTime = null;
+    this.updateStats();
+  }
+
+  resetDailyCountersIfNeeded() {
+    const today = new Date().toDateString();
+    if (this.stats.lastResetDate === today) {
+      return;
+    }
+
+    this.stats.dailyLikes = 0;
+    this.stats.dailyFollows = 0;
+    this.stats.lastResetDate = today;
+    this.updateStats();
+  }
+
+  checkDailyLimit(action) {
+    this.resetDailyCountersIfNeeded();
+
+    if (action === 'like') {
+      return this.stats.dailyLikes < (this.advancedSettings.dailyLikeLimit || 350);
+    }
+
+    if (action === 'follow') {
+      return this.stats.dailyFollows < (this.advancedSettings.dailyFollowLimit || 150);
+    }
+
+    return true;
+  }
+
+  isVisible(element) {
+    if (!element) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > 0 && rect.top < window.innerHeight;
+  }
+
+  getVisibleArea(element) {
+    if (!element) {
+      return 0;
+    }
+
+    const rect = element.getBoundingClientRect();
+    const visibleWidth = Math.max(0, Math.min(rect.right, window.innerWidth) - Math.max(rect.left, 0));
+    const visibleHeight = Math.max(0, Math.min(rect.bottom, window.innerHeight) - Math.max(rect.top, 0));
+    return visibleWidth * visibleHeight;
+  }
+
+  getElementCenter(element) {
+    const rect = element?.getBoundingClientRect?.();
+    if (!rect) {
+      return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    }
+
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    };
+  }
+
+  getReelElementRoot(element) {
+    if (!element) {
+      return document;
+    }
+
+    let current = element.nodeType === Node.ELEMENT_NODE ? element : element.parentElement;
+    let bestMatch = null;
+    let bestScore = -1;
+
+    while (current && current !== document.body) {
+      if (current.nodeType !== Node.ELEMENT_NODE) {
+        current = current.parentElement;
+        continue;
+      }
+
+      const hasVideo = Boolean(current.querySelector?.('video'));
+      const hasVideoPlayer = Boolean(current.querySelector?.('[aria-label="Video player"][role="group"]'));
+      const hasLikeButton = Boolean(current.querySelector?.('svg[aria-label="Like"], title'));
+      const hasReelLink = Boolean(current.querySelector?.('a[href*="/reel/"], a[href*="/reels/"]'));
+      const hasSidebarActions = Boolean(
+        current.querySelector?.(
+          'svg[aria-label="Like"], svg[aria-label="Comment"], svg[aria-label="Repost"], svg[aria-label="Share"], title'
+        )
+      );
+
+      const score =
+        (hasVideo ? 2 : 0) +
+        (hasVideoPlayer ? 4 : 0) +
+        (hasLikeButton ? 2 : 0) +
+        (hasReelLink ? 2 : 0) +
+        (hasSidebarActions ? 2 : 0);
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = current;
+      }
+
+      current = current.parentElement;
+    }
+
+    return (
+      bestMatch ||
+      element?.closest?.('article, main, section, div[role="presentation"]') ||
+      element?.closest?.('div') ||
+      document
+    );
+  }
+
+  getStableMediaSrc(media) {
+    const src = media?.currentSrc || media?.src || media?.getAttribute?.('src') || '';
+    if (!src || src.startsWith('blob:')) {
+      return null;
+    }
+    return src;
+  }
+
+  getActiveReelVideo(root = document) {
+    const scope = root?.querySelectorAll ? root : document;
+    const videos = [...scope.querySelectorAll('video')].filter((video) => this.getVisibleArea(video) > 0);
+
+    if (!videos.length && scope !== document) {
+      return this.getActiveReelVideo(document);
+    }
+
+    const viewportCenterX = window.innerWidth / 2;
+    const viewportCenterY = window.innerHeight / 2;
+
+    return videos.sort((left, right) => {
+      const leftCenter = this.getElementCenter(left);
+      const rightCenter = this.getElementCenter(right);
+      const leftDistance = Math.hypot(leftCenter.x - viewportCenterX, leftCenter.y - viewportCenterY);
+      const rightDistance = Math.hypot(rightCenter.x - viewportCenterX, rightCenter.y - viewportCenterY);
+      const leftScore =
+        this.getVisibleArea(left) +
+        (!left.paused ? 1000000 : 0) +
+        (left.readyState >= 2 ? 500000 : 0) +
+        ((left.currentTime || 0) > 0 ? 250000 : 0) -
+        leftDistance;
+      const rightScore =
+        this.getVisibleArea(right) +
+        (!right.paused ? 1000000 : 0) +
+        (right.readyState >= 2 ? 500000 : 0) +
+        ((right.currentTime || 0) > 0 ? 250000 : 0) -
+        rightDistance;
+      return rightScore - leftScore;
+    })[0] || null;
+  }
+
+  getItemId(container, fallbackPrefix) {
+    const activeVideo = this.getActiveReelVideo(container) || this.getActiveReelVideo(document);
+    const username = this.extractUsername(container || document);
+    const caption = this.extractCaption(container || document) || '';
+    const stableMediaSrc = this.getStableMediaSrc(activeVideo) || this.getStableMediaSrc(container?.querySelector?.('video'));
+    return (
+      container?.querySelector('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"]')?.href ||
+      stableMediaSrc ||
+      [window.location.pathname, username, caption.slice(0, 80)].filter(Boolean).join('|') ||
+      `${fallbackPrefix}:${window.location.pathname}:${container?.textContent?.slice(0, 40) || Math.random()}`
+    );
+  }
+
+  parseProfileFromHref(href) {
+    if (!href?.startsWith('/')) {
+      return null;
+    }
+
+    const segment = href.split('/').filter(Boolean)[0];
+    if (!segment) {
+      return null;
+    }
+
+    const reserved = new Set([
+      'accounts',
+      'direct',
+      'explore',
+      'p',
+      'reel',
+      'reels',
+      'stories',
+      'about',
+      'developer',
+      'legal',
+      'challenge',
+    ]);
+
+    if (reserved.has(segment.toLowerCase())) {
+      return null;
+    }
+
+    return /^[a-zA-Z0-9._]{1,30}$/.test(segment) ? segment : null;
+  }
+
+  extractUsername(root = document) {
+    const prioritySelectors = [
+      'header a[href^="/"]',
+      'article header a[href^="/"]',
+      'a[href*="/reel/"]',
+      'a[href*="/reels/"]',
+      'a[href^="/"]',
+    ];
+
+    for (const selector of prioritySelectors) {
+      const candidates = root.querySelectorAll(selector);
+      for (const candidate of candidates) {
+        const username = this.parseProfileFromHref(candidate.getAttribute('href'));
+        if (username) {
+          return username;
+        }
+      }
+    }
+
+    const textCandidates = root.querySelectorAll('span, a');
+    for (const candidate of textCandidates) {
+      const text = candidate.textContent?.trim();
+      if (text && /^[a-zA-Z0-9._]{1,30}$/.test(text)) {
+        return text;
+      }
+    }
+
+    return 'unknown_user';
+  }
+
+  extractAudioName(root = document) {
+    const link = root.querySelector('a[href*="/audio/"], a[href*="/music/"]');
+    if (link?.textContent?.trim()) {
+      return link.textContent.trim();
+    }
+
+    const textNodes = [...root.querySelectorAll('span, a')];
+    const originalAudio = textNodes.find((node) => /original audio|audio/i.test(node.textContent || ''));
+    return originalAudio?.textContent?.trim() || null;
+  }
+
+  extractCaption(root = document) {
+    const candidates = [...root.querySelectorAll('h1, h2, span[dir="auto"], div[role="button"] span')];
+    const captions = candidates
+      .map((node) => node.textContent?.trim())
+      .filter((text) => text && text.length > 8 && text.length < 500);
+
+    return captions.sort((a, b) => b.length - a.length)[0] || null;
+  }
+
+  normalizeInstagramUrl(rawUrl) {
+    if (!rawUrl) {
+      return null;
+    }
+
+    try {
+      const url = new URL(rawUrl, window.location.origin);
+      return `${url.origin}${url.pathname}`;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  extractCanonicalPostUrl(root = document, contentType = this.currentMode === 'reels' ? 'reel' : 'post') {
+    const container = root || document;
+    const rawCandidates = [...container.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/reels/"]')]
+      .map((link) => link.getAttribute('href'))
+      .filter(Boolean);
+
+    const allowedPrefixes = contentType === 'reel' ? ['/reel/', '/reels/'] : ['/p/', '/reel/', '/reels/'];
+    const filtered = rawCandidates.filter((href) => allowedPrefixes.some((prefix) => href.includes(prefix)));
+
+    filtered.sort((left, right) => {
+      const leftRank = allowedPrefixes.findIndex((prefix) => left.includes(prefix));
+      const rightRank = allowedPrefixes.findIndex((prefix) => right.includes(prefix));
+      if (leftRank !== rightRank) {
+        return leftRank - rightRank;
+      }
+      return left.length - right.length;
+    });
+
+    return this.normalizeInstagramUrl(filtered[0]) || null;
+  }
+
+  extractPostData(root = document, contentType = this.currentMode === 'reels' ? 'reel' : 'post', options = {}) {
+    const normalizedOptions =
+      typeof options === 'string' ? { canonicalUrl: options } : options && typeof options === 'object' ? options : {};
+    const canonicalUrl = this.normalizeInstagramUrl(normalizedOptions.canonicalUrl);
+    const automation = normalizedOptions.automation && typeof normalizedOptions.automation === 'object' ? normalizedOptions.automation : null;
+    const username = this.extractUsername(root);
+    const channelName = username;
+    const caption = this.extractCaption(root);
+    const video = root.querySelector('video');
+    const image = root.querySelector('img[src]');
+    const postUrl =
+      canonicalUrl || this.extractCanonicalPostUrl(root, contentType) || this.normalizeInstagramUrl(window.location.href) || window.location.href;
+
+    const payload = {
+      platform: 'instagram',
+      contentType,
+      timestamp: new Date().toISOString(),
+      username,
+      channelName,
+      audioName: this.extractAudioName(root),
+      caption,
+      postUrl,
+      imageUrl: this.getStableMediaSrc(image) || image?.src || null,
+      videoUrl: this.getStableMediaSrc(video),
+      isVideo: Boolean(video),
+      hashtags: caption ? caption.match(/#\w+/g) || [] : [],
+      mentions: caption ? caption.match(/@\w+/g) || [] : [],
+    };
+
+    if (automation) {
+      Object.assign(payload, automation);
+    }
+
+    return payload;
+  }
+
+  getElementText(element) {
+    return element?.textContent?.trim().toLowerCase() || '';
+  }
+
+  getAccessibleLabel(element) {
+    return (
+      element?.getAttribute?.('aria-label') ||
+      element?.getAttribute?.('title') ||
+      element?.querySelector?.('svg')?.getAttribute?.('aria-label') ||
+      element?.querySelector?.('title')?.textContent ||
+      ''
+    )
+      .trim()
+      .toLowerCase();
+  }
+
+  getDelayRange(key, fallback) {
+    const configured = this.advancedSettings?.[key];
+    const min = Number(configured?.min);
+    const max = Number(configured?.max);
+
+    if (Number.isFinite(min) && Number.isFinite(max) && min > 0 && max >= min) {
+      return { min, max };
+    }
+
+    return fallback;
+  }
+
+  async saveScrapedData(data) {
+    if (!data?.username || data.username === 'unknown_user') {
+      return false;
+    }
+
+    try {
+      const existing = await chrome.storage.local.get(['scrapedData']);
+      const scrapedData = Array.isArray(existing.scrapedData) ? existing.scrapedData : [];
+      const entryId = [
+        data.contentType || '',
+        data.username || '',
+        data.postUrl || data.storyUrl || '',
+        data.audioName || '',
+      ].join('|');
+
+      const alreadySaved = scrapedData.some((item) => {
+        const itemId = [
+          item?.contentType || '',
+          item?.username || '',
+          item?.postUrl || item?.storyUrl || '',
+          item?.audioName || '',
+        ].join('|');
+        return itemId === entryId;
+      });
+
+      if (alreadySaved) {
+        return true;
+      }
+
+      scrapedData.unshift({
+        ...data,
+        savedAt: new Date().toISOString(),
+      });
+
+      await chrome.storage.local.set({
+        scrapedData: scrapedData.slice(0, 1000),
+      });
+
+      this.stats.scraped += 1;
+      this.updateStats();
+      return true;
+    } catch (error) {
+      this.sendStatusMessage(`Could not save scraped data locally: ${error?.message || 'unknown error'}`);
+      return false;
+    }
+  }
+
+  isSponsoredReel(root = document) {
+    const container = root || document;
+    const text = [container.textContent || '', ...[...container.querySelectorAll('a, button, span, div')].slice(0, 40).map((node) => this.getNodeIntentText(node))]
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return /\b(sponsored|promoted|paid partnership)\b/i.test(text);
+  }
+
+  shouldCountCompletedReel(reelState = this.currentReelState) {
+    if (!reelState || reelState.sponsored) {
+      return false;
+    }
+
+    if (!this.settings.autoLike) {
+      return true;
+    }
+
+    return Boolean(reelState.liked);
+  }
+
+  getNodeIntentText(node) {
+    if (!node) {
+      return '';
+    }
+
+    const descendantText = [...(node.querySelectorAll?.('svg, title, span, div') || [])]
+      .slice(0, 8)
+      .flatMap((child) => [child.getAttribute?.('aria-label'), child.getAttribute?.('title'), child.textContent]);
+
+    return [node.getAttribute?.('aria-label'), node.getAttribute?.('title'), node.textContent, ...descendantText]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  hasUnlikeIntent(node) {
+    const directText = [
+      node?.getAttribute?.('aria-label'),
+      node?.getAttribute?.('title'),
+      node?.querySelector?.('svg')?.getAttribute?.('aria-label'),
+      node?.querySelector?.('title')?.textContent,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+    if (/(^|\s)(unlike|remove like|liked)(\s|$)/i.test(directText)) {
+      return true;
+    }
+
+    const intentText = this.getNodeIntentText(node);
+    return /(^|\s)(unlike|remove like)(\s|$)/i.test(intentText);
+  }
+
+  hasLikeIntent(node) {
+    const directText = [
+      node?.getAttribute?.('aria-label'),
+      node?.getAttribute?.('title'),
+      node?.querySelector?.('svg')?.getAttribute?.('aria-label'),
+      node?.querySelector?.('title')?.textContent,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+
+    if (/(^|\s)like(\s|$)/i.test(directText)) {
+      return !this.hasUnlikeIntent(node);
+    }
+
+    const intentText = this.getNodeIntentText(node);
+    return /(^|\s)like(\s|$)/i.test(intentText) && !this.hasUnlikeIntent(node);
+  }
+
+  findLikeButton(root = document) {
+    const activeVideo = this.getActiveReelVideo(root) || this.getActiveReelVideo(document);
+    const referencePoint = this.getElementCenter(activeVideo || root);
+    const sidebarFirst = [
+      ...root.querySelectorAll(
+        '[role="button"] svg[aria-label="Like"], [role="button"] title, div[role="button"] svg[aria-label="Like"]'
+      ),
+    ];
+
+    for (const node of sidebarFirst) {
+      if (node.tagName?.toLowerCase() === 'title' && this.getElementText(node) !== 'like') {
+        continue;
+      }
+      const button = node.closest?.('[role="button"], button');
+      if (!button || this.hasUnlikeIntent(button) || this.getVisibleArea(button) <= 0) {
+        continue;
+      }
+      return button;
+    }
+
+    const exactSelectors = [
+      'svg[aria-label="Like"]',
+      'svg[aria-label="Like"] title',
+      'title',
+    ];
+
+    for (const selector of exactSelectors) {
+      const nodes = [...root.querySelectorAll(selector)];
+      for (const node of nodes) {
+        if (selector === 'title' && this.getElementText(node) !== 'like') {
+          continue;
+        }
+
+        const button = node.closest?.('[role="button"], button') || node.parentElement?.closest?.('[role="button"], button');
+        if (!button || this.hasUnlikeIntent(button) || this.getVisibleArea(button) <= 0) {
+          continue;
+        }
+        if (this.hasLikeIntent(button) || this.hasLikeIntent(node) || selector !== 'title') {
+          return button;
+        }
+      }
+    }
+
+    const directCandidates = [
+      ...root.querySelectorAll('button, div[role="button"], span[role="button"], svg[aria-label], title'),
+      ...document.querySelectorAll('button, div[role="button"], span[role="button"], svg[aria-label], title'),
+    ];
+    const seen = new Set();
+    const matches = [];
+
+    for (const candidate of directCandidates) {
+      const button = candidate.closest?.('button, div[role="button"], span[role="button"]') || candidate;
+      if (!button || seen.has(button)) {
+        continue;
+      }
+      seen.add(button);
+
+      if (this.hasUnlikeIntent(button) || this.getVisibleArea(button) <= 0) {
+        continue;
+      }
+
+      if (this.hasLikeIntent(button) || this.hasLikeIntent(candidate)) {
+        const center = this.getElementCenter(button);
+        const distance = Math.hypot(center.x - referencePoint.x, center.y - referencePoint.y);
+        matches.push({ button, distance, label: this.getNodeIntentText(button) });
+      }
+    }
+
+    matches.sort((left, right) => {
+      const leftExact = left.label === 'like' ? -1000 : 0;
+      const rightExact = right.label === 'like' ? -1000 : 0;
+      return left.distance + leftExact - (right.distance + rightExact);
+    });
+
+    return matches[0]?.button || null;
+  }
+
+  findUnlikeButton(root = document) {
+    const activeVideo = this.getActiveReelVideo(root) || this.getActiveReelVideo(document);
+    const referencePoint = this.getElementCenter(activeVideo || root);
+    const candidateScopes = [root, document].filter(Boolean);
+    const seen = new Set();
+    const matches = [];
+
+    for (const scope of candidateScopes) {
+      const nodes = [...scope.querySelectorAll('button, div[role="button"], span[role="button"], svg[aria-label], title')];
+      for (const node of nodes) {
+        const button = node.closest?.('button, div[role="button"], span[role="button"]') || node;
+        if (!button || seen.has(button)) {
+          continue;
+        }
+        seen.add(button);
+
+        if (this.getVisibleArea(button) <= 0) {
+          continue;
+        }
+
+        if (!this.hasUnlikeIntent(button) && !this.hasUnlikeIntent(node)) {
+          continue;
+        }
+
+        const center = this.getElementCenter(button);
+        const distance = Math.hypot(center.x - referencePoint.x, center.y - referencePoint.y);
+        if (distance > Math.max(window.innerWidth, window.innerHeight) * 0.9) {
+          continue;
+        }
+
+        const label = this.getNodeIntentText(button);
+        const exactBoost = /\bunlike\b/i.test(label) || /\bremove like\b/i.test(label) ? -1200 : 0;
+        matches.push({ button, distance: distance + exactBoost });
+      }
+    }
+
+    matches.sort((left, right) => left.distance - right.distance);
+    return matches[0]?.button || null;
+  }
+
+  isAlreadyLiked(root = document) {
+    const scope = root?.querySelectorAll ? root : document;
+    return Boolean(this.findUnlikeButton(scope) || (scope !== document ? this.findUnlikeButton(document) : null));
+  }
+
+  safeClick(element) {
+    if (!element) {
+      return false;
+    }
+
+    try {
+      element.focus?.();
+      element.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+      element.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+      element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+      if (typeof PointerEvent === 'function') {
+        element.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true }));
+        element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+      }
+      element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+      element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
+      if (typeof PointerEvent === 'function') {
+        element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, button: 0 }));
+      }
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      element.click();
+      return true;
+    } catch (error) {
+      console.error('Click failed:', error);
+      return false;
+    }
+  }
+
+  async clickElementReliably(element) {
+    if (!element) {
+      return false;
+    }
+
+    const targets = [
+      element,
+      element.querySelector?.('svg'),
+      element.querySelector?.('span'),
+      element.firstElementChild,
+      element.parentElement,
+    ].filter(Boolean);
+
+    for (const target of targets) {
+      if (this.safeClick(target)) {
+        return true;
+      }
+      await this.wait(120, 220);
+    }
+
+    return false;
+  }
+
+  dispatchNavigationKey(key, code, keyCode) {
+    const targets = [document.activeElement, document.body, document.documentElement, document].filter(Boolean);
+    const dispatched = new Set();
+
+    for (const target of targets) {
+      if (dispatched.has(target)) {
+        continue;
+      }
+      dispatched.add(target);
+
+      for (const eventName of ['keydown', 'keyup']) {
+        target.dispatchEvent(
+          new KeyboardEvent(eventName, {
+            key,
+            code,
+            keyCode,
+            which: keyCode,
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+      }
+    }
+  }
+
+  async doubleClickMedia(root = document) {
+    const media = this.getActiveReelVideo(root) || root.querySelector('video, img') || document.querySelector('video, img');
+    if (!media) {
+      return false;
+    }
+
+    try {
+      const rect = media.getBoundingClientRect();
+      const clientX = rect.left + rect.width / 2;
+      const clientY = rect.top + rect.height / 2;
+
+      media.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, clientX, clientY }));
+      media.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+      media.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+      media.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX, clientY, detail: 1, button: 0 }));
+      media.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+      media.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX, clientY, button: 0 }));
+      media.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX, clientY, detail: 2, button: 0 }));
+      media.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window, clientX, clientY }));
+
+      return true;
+    } catch (error) {
+      console.error('Double click failed:', error);
+      return false;
+    }
+  }
+
+  getReelIdentity(root = this.getReelContainer()) {
+    const media = this.getActiveReelVideo(root) || root?.querySelector?.('video, img');
+    const username = this.extractUsername(root);
+    const mediaSrc = this.getStableMediaSrc(media) || '';
+    const caption = this.extractCaption(root) || '';
+    const pathname = window.location.pathname || '';
+
+    return [pathname, username, mediaSrc, caption.slice(0, 80)].filter(Boolean).join('|');
+  }
+
+  getCurrentReelSnapshot(root = this.getReelContainer()) {
+    const video = this.getActiveReelVideo(root) || this.getActiveReelVideo(document);
+    const container = this.getReelElementRoot(video || root);
+    const reelLink =
+      container?.querySelector?.('a[href*="/reel/"]')?.href ||
+      container?.querySelector?.('a[href*="/reels/"]')?.href ||
+      document.querySelector('a[href*="/reel/"]')?.href ||
+      window.location.href;
+    const username = this.extractUsername(container);
+    const caption = this.extractCaption(container) || '';
+    const mediaSrc = this.getStableMediaSrc(video) || this.getStableMediaSrc(container?.querySelector?.('video')) || '';
+    const identity = [reelLink, username, mediaSrc, caption.slice(0, 80)].filter(Boolean).join('|');
+
+    return {
+      id: identity || this.getItemId(container, 'reel'),
+      container,
+      video,
+      reelLink,
+      username,
+    };
+  }
+
+  async likeCurrentItem(root = document) {
+    if (!this.settings.autoLike || !this.checkDailyLimit('like')) {
+      return false;
+    }
+
+    if (this.isAlreadyLiked(root)) {
+      return false;
+    }
+
+    const likeDelay = this.getDelayRange('likeDelay', { min: 1500, max: 3200 });
+
+    if (this.currentMode === 'reels') {
+      await this.wait(likeDelay.min, likeDelay.max);
+      const mediaLiked = await this.doubleClickMedia(root);
+      if (mediaLiked) {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          await this.wait(500, 900);
+          if (this.isAlreadyLiked(root)) {
+            this.stats.likes += 1;
+            this.stats.dailyLikes += 1;
+            this.updateStats();
+            this.sendStatusMessage('Liked reel.');
+            return true;
+          }
+        }
+      }
+    }
+
+    const button = this.findLikeButton(root) || this.findLikeButton(document);
+    if (button) {
+      await this.wait(Math.max(300, likeDelay.min / 2), Math.max(700, likeDelay.max / 2));
+      const clicked = await this.clickElementReliably(button);
+      if (!clicked) {
+        return false;
+      }
+    } else {
+      const fallbackLiked = await this.doubleClickMedia(root);
+      if (!fallbackLiked) {
+        this.sendStatusMessage('Like action was not found on this reel.');
+        return false;
+      }
+    }
+
+    let confirmedLike = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await this.wait(500, 900);
+      confirmedLike = this.isAlreadyLiked(root);
+      if (confirmedLike) {
+        break;
+      }
+
+      if (attempt === 1) {
+        const fallbackLiked = await this.doubleClickMedia(root);
+        if (fallbackLiked) {
+          await this.wait(600, 1000);
+        }
+      }
+    }
+
+    if (!confirmedLike) {
+      this.sendStatusMessage('Instagram did not confirm the like on this reel.');
+      return false;
+    }
+
+    this.stats.likes += 1;
+    this.stats.dailyLikes += 1;
+    this.updateStats();
+    this.sendStatusMessage(`Liked ${this.currentMode.slice(0, -1) || 'item'}.`);
+    return true;
+  }
+
+  async waitForVideoPlayback(video, timeoutMs = 12000) {
+    if (!video) {
+      return false;
+    }
+
+    const startedAt = Date.now();
+    let previousTime = video.currentTime || 0;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        await this.wait(500, 800);
+        const currentTime = video.currentTime || 0;
+        if (currentTime > previousTime + 0.05 || (!video.paused && video.readyState >= 3)) {
+          return true;
+        }
+        previousTime = currentTime;
+      }
+
+      await this.wait(400, 700);
+    }
+
+    return video.readyState >= 2 && video.videoWidth > 0;
+  }
+
+  async waitForCurrentReelReady(root = this.getReelContainer()) {
+    const startedAt = Date.now();
+    const timeoutMs = 15000;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const fallbackContainer = root || this.getReelContainer();
+      const video = this.getActiveReelVideo(fallbackContainer) || this.getActiveReelVideo(document);
+      const container = this.getReelElementRoot(video || fallbackContainer);
+      const image = container?.querySelector?.('img');
+
+      if (video) {
+        const ready = await this.waitForVideoPlayback(video, 3500);
+        if (ready) {
+          return { ready: true, container, mediaType: 'video' };
+        }
+      } else if (image?.complete && image.naturalWidth > 0) {
+        return { ready: true, container, mediaType: 'image' };
+      }
+
+      await this.wait(600, 900);
+    }
+
+    return { ready: false, container: root || this.getReelContainer(), mediaType: 'unknown' };
+  }
+
+  async mimicHumanPresence(root = this.getReelContainer()) {
+    const container = root || this.getReelContainer();
+    const rect = container?.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
+      return;
+    }
+
+    const pointX = Math.round(rect.left + rect.width * (0.35 + Math.random() * 0.3));
+    const pointY = Math.round(rect.top + rect.height * (0.3 + Math.random() * 0.4));
+
+    document.dispatchEvent(
+      new MouseEvent('mousemove', {
+        bubbles: true,
+        clientX: pointX,
+        clientY: pointY,
+      })
+    );
+  }
+
+  isVideoFinished(video) {
+    if (!video) {
+      return false;
+    }
+
+    const duration = Number(video.duration);
+    if (video.ended) {
+      return true;
+    }
+
+    if (Number.isFinite(duration) && duration > 0) {
+      return video.currentTime >= Math.max(duration - 0.25, duration * 0.98);
+    }
+
+    return false;
+  }
+
+  isVideoNearEnd(video, thresholdSeconds = 1.2) {
+    if (!video) {
+      return false;
+    }
+
+    const duration = Number(video.duration);
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return false;
+    }
+
+    return video.currentTime >= Math.max(duration - thresholdSeconds, duration * 0.92);
+  }
+
+  async waitForReelToFinish(root = this.getReelContainer(), token = this.runToken) {
+    const initialSnapshot = this.getCurrentReelSnapshot(root);
+    let lockedContainer = initialSnapshot.container || root || this.getReelContainer();
+    let lockedVideo = this.getActiveReelVideo(lockedContainer);
+    let lastTime = 0;
+    let maxObservedTime = 0;
+    let pausedMessageSent = false;
+    let lastPresenceAt = 0;
+    let waitingForVideoMessageSent = false;
+    let stagnantLoops = 0;
+
+    while (this.isRunning && token === this.runToken) {
+      let activeVideo = lockedVideo && document.contains(lockedVideo) ? lockedVideo : this.getActiveReelVideo(lockedContainer);
+      if (!activeVideo && document.contains(lockedContainer)) {
+        activeVideo = lockedContainer.querySelector('video');
+      }
+      if (!activeVideo) {
+        const refreshedSnapshot = this.getCurrentReelSnapshot(lockedContainer);
+        lockedContainer = refreshedSnapshot.container || lockedContainer;
+        activeVideo = refreshedSnapshot.video;
+      }
+
+      if (!activeVideo) {
+        if (!waitingForVideoMessageSent) {
+          this.sendStatusMessage('Waiting for the current reel video...');
+          waitingForVideoMessageSent = true;
+        }
+        await this.wait(700, 1100);
+        continue;
+      }
+
+      waitingForVideoMessageSent = false;
+      lockedVideo = activeVideo;
+      lockedContainer = this.getReelElementRoot(activeVideo) || lockedContainer;
+      const container = lockedContainer;
+
+      if (this.isVideoFinished(activeVideo)) {
+        this.sendStatusMessage('Reel finished. Moving to the next reel...');
+        return true;
+      }
+
+      if (activeVideo.paused) {
+        if (!pausedMessageSent) {
+          this.sendStatusMessage('Reel paused. Waiting for playback to resume...');
+          pausedMessageSent = true;
+        }
+        await this.wait(700, 1100);
+        continue;
+      }
+
+      if (pausedMessageSent) {
+        this.sendStatusMessage('Playback resumed. Waiting for reel to finish...');
+        pausedMessageSent = false;
+      }
+
+      const currentTime = activeVideo.currentTime || 0;
+      const duration = Number(activeVideo.duration);
+      const watchedToEnd =
+        Number.isFinite(duration) && duration > 0
+          ? maxObservedTime >= Math.max(duration - 1.5, duration * 0.85)
+          : maxObservedTime > 8;
+      if (currentTime < lastTime - 1.5 && this.isVideoNearEnd(activeVideo, 1.5) === false && watchedToEnd) {
+        this.sendStatusMessage('Reel restarted after finishing. Moving to the next reel...');
+        return true;
+      }
+
+      if (currentTime > lastTime + 0.2) {
+        lastTime = currentTime;
+        maxObservedTime = Math.max(maxObservedTime, currentTime);
+        stagnantLoops = 0;
+      } else {
+        maxObservedTime = Math.max(maxObservedTime, currentTime);
+        stagnantLoops += 1;
+      }
+
+      if (stagnantLoops >= 4 && this.isVideoNearEnd(activeVideo)) {
+        this.sendStatusMessage('Reel reached the end. Moving to the next reel...');
+        return true;
+      }
+
+      if (stagnantLoops >= 8 && !activeVideo.paused) {
+        this.sendStatusMessage('Reel playback looks stuck. Waiting for it to continue...');
+      }
+
+      if (Date.now() - lastPresenceAt > this.randomBetween(2200, 3600)) {
+        await this.mimicHumanPresence(container);
+        lastPresenceAt = Date.now();
+      }
+
+      await this.wait(500, 900);
+    }
+
+    return false;
+  }
+
+  async smoothScrollFeed() {
+    if (!this.settings.autoScroll) {
+      return;
+    }
+
+    window.scrollBy({
+      top: Math.round(window.innerHeight * 0.75),
+      behavior: 'smooth',
+    });
+
+    this.stats.scrolls += 1;
+    this.updateStats();
+
+    const delay = this.advancedSettings.scrollDelay || { min: 2000, max: 5000 };
+    await this.wait(delay.min, delay.max);
+  }
+
+  async advanceReel(countScroll = true) {
+    if (!this.settings.autoScroll) {
+      return false;
+    }
+
+    const beforeIdentity = this.getReelIdentity();
+    let moved = false;
+
+    const nextButton = document.querySelector(
+      'button[aria-label*="Next" i], div[role="button"][aria-label*="Next" i], a[aria-label*="Next" i]'
+    );
+    if (nextButton) {
+      await this.wait(250, 650);
+      await this.clickElementReliably(nextButton);
+      moved = await this.waitForReelChange(beforeIdentity, 8);
+    }
+
+    if (!moved) {
+      const activeReel = this.getReelContainer();
+      const activeVideo = this.getActiveReelVideo(activeReel) || this.getActiveReelVideo(document);
+      activeVideo?.focus?.();
+      activeReel?.focus?.();
+
+      this.dispatchNavigationKey('ArrowDown', 'ArrowDown', 40);
+      await this.wait(180, 320);
+      this.dispatchNavigationKey('PageDown', 'PageDown', 34);
+      moved = await this.waitForReelChange(beforeIdentity, 8);
+    }
+
+    if (!moved) {
+      const wheelSteps = Math.random() < 0.3 ? [0.16, -0.04, 0.34, 0.46, 0.58] : [0.22, 0.37, 0.49, 0.62];
+      for (const multiplier of wheelSteps) {
+        window.dispatchEvent(
+          new WheelEvent('wheel', {
+            deltaY: window.innerHeight * multiplier,
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        await this.wait(140, 320);
+      }
+      moved = await this.waitForReelChange(beforeIdentity, 8);
+    }
+
+    if (!moved) {
+      const scrollOffsets = [0.45, 0.72, 0.95];
+      for (const offset of scrollOffsets) {
+        window.scrollBy({
+          top: Math.round(window.innerHeight * offset),
+          behavior: 'smooth',
+        });
+        await this.wait(260, 520);
+      }
+      moved = await this.waitForReelChange(beforeIdentity, 10);
+    }
+
+    if (!moved) {
+      this.sendStatusMessage('Could not move to the next reel.');
+      return false;
+    }
+
+    if (countScroll) {
+      this.stats.scrolls += 1;
+      this.updateStats();
+    }
+    return true;
+  }
+
+  async waitForReelChange(previousIdentity, attempts = 10) {
+    for (let index = 0; index < attempts; index += 1) {
+      await this.wait(500, 700);
+      const currentIdentity = this.getReelIdentity();
+      if (currentIdentity && currentIdentity !== previousIdentity) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async takeHumanPause() {
+    const baseDelay = this.advancedSettings.scrollDelay || { min: 3500, max: 6500 };
+    await this.wait(
+      Math.max(baseDelay.min, 3500),
+      Math.max(baseDelay.max, Math.max(baseDelay.min, 6500))
+    );
+
+    if (Math.random() < 0.22) {
+      await this.wait(5000, 10000);
+    }
+  }
+
+  isStoryViewerOpen() {
+    return Boolean(
+      document.querySelector('div[role="dialog"] button[aria-label="Close"], button[aria-label="Close"]')
+    );
+  }
+
+  async openStoryViewer() {
+    if (this.isStoryViewerOpen()) {
+      return true;
+    }
+
+    const candidates = [
+      ...document.querySelectorAll('a[href^="/stories/"]'),
+      ...document.querySelectorAll('canvas[style*="cursor: pointer"]'),
+      ...document.querySelectorAll('button img[alt*="story" i], a img[alt*="story" i]'),
+    ];
+
+    const clickable = candidates
+      .map((candidate) => candidate.closest('a, button, div[role="button"]') || candidate)
+      .find(Boolean);
+
+    if (!clickable) {
+      return false;
+    }
+
+    this.safeClick(clickable);
+    await this.wait(1800, 2800);
+    return this.isStoryViewerOpen();
+  }
+
+  async advanceStory() {
+    if (!this.settings.autoScroll) {
+      return;
+    }
+
+    const nextButton = document.querySelector('button[aria-label="Next"], button[aria-label="Next story"]');
+    if (nextButton) {
+      this.safeClick(nextButton);
+    } else {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          code: 'ArrowRight',
+          keyCode: 39,
+          which: 39,
+          bubbles: true,
+        })
+      );
+    }
+
+    this.stats.scrolls += 1;
+    this.updateStats();
+    await this.wait(1500, 2500);
+  }
+
+  getVisiblePostArticle() {
+    const articles = [...document.querySelectorAll('article')];
+    return articles.find((article) => this.isVisible(article)) || articles[0] || null;
+  }
+
+  getReelContainer() {
+    const activeVideo = this.getActiveReelVideo(document);
+    if (activeVideo) {
+      return this.getReelElementRoot(activeVideo);
+    }
+
+    const candidates = [...document.querySelectorAll('article, main, div[role="presentation"]')];
+    return candidates.find((candidate) => this.isVisible(candidate) && candidate.querySelector('video')) || document;
+  }
+
+  async ensureModeContext() {
+    if (this.currentMode === 'reels') {
+      if (!window.location.pathname.startsWith('/reels') && !window.location.pathname.startsWith('/reel/')) {
+        this.sendStatusMessage('Opening Instagram Reels...');
+        window.location.assign('https://www.instagram.com/reels/');
+        return false;
+      }
+      return true;
+    }
+
+    if (this.currentMode === 'posts') {
+      if (window.location.pathname !== '/') {
+        this.sendStatusMessage('Opening the Instagram home feed...');
+        window.location.assign('https://www.instagram.com/');
+        return false;
+      }
+      return true;
+    }
+
+    if (this.currentMode === 'stories') {
+      if (window.location.pathname !== '/') {
+        this.sendStatusMessage('Opening the Instagram home feed for stories...');
+        window.location.assign('https://www.instagram.com/');
+        return false;
+      }
+      return true;
+    }
+
+    if (this.currentMode === 'search') {
+      if (!this.targetUsername) {
+        this.sendStatusMessage('No username available for search.');
+        return false;
+      }
+
+      const currentUsername = window.location.pathname.split('/').filter(Boolean)[0]?.toLowerCase();
+      if (currentUsername !== this.targetUsername.toLowerCase()) {
+        this.sendStatusMessage(`Opening profile for ${this.targetUsername}...`);
+        window.location.assign(`https://www.instagram.com/${encodeURIComponent(this.targetUsername)}/`);
+        return false;
+      }
+      return true;
+    }
+
+    return true;
+  }
+
+  async processPosts(token) {
+    const article = this.getVisiblePostArticle();
+    if (!article) {
+      this.sendStatusMessage('Waiting for posts to load...');
+      await this.wait(2000, 3000);
+      return;
+    }
+
+    const itemId = this.getItemId(article, 'post');
+    if (!this.processedItems.has(itemId)) {
+      this.processedItems.add(itemId);
+      this.sendStatusMessage('Processing visible post...');
+
+      if (token !== this.runToken) {
+        return;
+      }
+
+      const alreadyLikedAtStart = this.isAlreadyLiked(article);
+      const likedNow = alreadyLikedAtStart ? false : await this.likeCurrentItem(article);
+
+      if (this.settings.dataScrape) {
+        await this.saveScrapedData(
+          this.extractPostData(article, 'post', {
+            automation: {
+              autoLiked: Boolean(likedNow),
+              autoAlreadyLiked: Boolean(alreadyLikedAtStart),
+            },
+          })
+        );
+      }
+    }
+
+    if (token === this.runToken) {
+      await this.smoothScrollFeed();
+    }
+  }
+
+  async processReels(token) {
+    const initialContainer = this.getReelContainer();
+    const readyState = await this.waitForCurrentReelReady(initialContainer);
+    const snapshot = this.getCurrentReelSnapshot(readyState.container || initialContainer);
+    const itemId = snapshot.id || this.getItemId(snapshot.container, 'reel');
+    const isSponsored = this.isSponsoredReel(snapshot.container);
+
+    if (!this.currentReelState || this.currentReelState.id !== itemId) {
+      this.currentReelState = {
+        id: itemId,
+        scraped: false,
+        liked: false,
+        alreadyLiked: false,
+        sponsored: isSponsored,
+      };
+    }
+
+    if (isSponsored) {
+      this.currentReelState.scraped = true;
+      this.currentReelState.liked = true;
+      this.sendStatusMessage('Sponsored reel detected. Skipping ad...');
+      const moved = await this.advanceReel(false);
+      if (!moved) {
+        await this.wait(1200, 2200);
+      }
+      return;
+    }
+
+    this.sendStatusMessage(
+      readyState.ready
+        ? 'Current reel loaded. Waiting until video ends before scroll...'
+        : 'Waiting for current reel video to load...'
+    );
+
+    if (token !== this.runToken) {
+      return;
+    }
+
+    const alreadyLikedAtStart = this.isAlreadyLiked(snapshot.container);
+    this.currentReelState.alreadyLiked = alreadyLikedAtStart;
+    if (!this.currentReelState.liked && !alreadyLikedAtStart) {
+      this.currentReelState.liked = await this.likeCurrentItem(snapshot.container);
+    }
+
+    this.sendStatusMessage('Waiting for current reel video to end...');
+    const finished = await this.waitForReelToFinish(snapshot.container, token);
+    if (!finished || token !== this.runToken) {
+      return;
+    }
+
+    const alreadyLikedAfterFinish = this.isAlreadyLiked(snapshot.container);
+    this.currentReelState.alreadyLiked = this.currentReelState.alreadyLiked || alreadyLikedAfterFinish;
+    if (!this.currentReelState.liked && !alreadyLikedAfterFinish) {
+      let liked = await this.likeCurrentItem(snapshot.container);
+      if (!liked && this.settings.autoLike) {
+        await this.wait(700, 1200);
+        liked = await this.likeCurrentItem(snapshot.container);
+      }
+      this.currentReelState.liked = liked;
+    }
+
+    if (!this.processedItems.has(itemId)) {
+      this.processedItems.add(itemId);
+    }
+
+    if (token === this.runToken) {
+      const moved = await this.advanceReel(true);
+      if (this.settings.dataScrape && !this.currentReelState.scraped) {
+        const scrapedPayload = this.extractPostData(snapshot.container, 'reel', {
+          canonicalUrl: snapshot.reelLink,
+          automation: {
+            autoLiked: Boolean(this.currentReelState.liked),
+            autoAlreadyLiked: Boolean(this.currentReelState.alreadyLiked),
+            autoSponsored: Boolean(this.currentReelState.sponsored),
+            autoScrollCounted: true,
+            autoAdvanced: Boolean(moved),
+          },
+        });
+        const scraped = await this.saveScrapedData(scrapedPayload);
+        this.currentReelState.scraped = Boolean(scraped);
+      }
+      if (!moved) {
+        await this.wait(2500, 4000);
+      }
+    }
+  }
+
+  async processStories(token) {
+    const viewerReady = await this.openStoryViewer();
+    if (!viewerReady) {
+      this.sendStatusMessage('Waiting for story tray...');
+      await this.wait(2000, 3000);
+      return;
+    }
+
+    const root = document.querySelector('div[role="dialog"]') || document;
+    const itemId = this.getItemId(root, 'story');
+
+    if (!this.processedItems.has(itemId)) {
+      this.processedItems.add(itemId);
+
+      if (this.settings.dataScrape) {
+        const storyData = {
+          platform: 'instagram',
+          contentType: 'story',
+          timestamp: new Date().toISOString(),
+          username: this.extractUsername(root),
+          channelName: this.extractUsername(root),
+          storyUrl: window.location.href,
+        };
+        await this.saveScrapedData(storyData);
+      }
+    }
+
+    await this.wait(3500, 6000);
+    if (token === this.runToken) {
+      await this.advanceStory();
+    }
+  }
+
+  async followCurrentProfile() {
+    if (!this.settings.autoFollow || !this.checkDailyLimit('follow')) {
+      return { success: false, reason: 'follow-disabled-or-limit' };
+    }
+
+    await this.wait(1800, 3200);
+    const buttons = [...document.querySelectorAll('button, div[role="button"]')];
+
+    for (const button of buttons) {
+      const text = button.textContent?.trim().toLowerCase();
+      if (!text) {
+        continue;
+      }
+
+      if (['following', 'requested'].includes(text)) {
+        return { success: false, reason: text };
+      }
+
+      if (text === 'follow' || text === 'follow back') {
+        const clicked = this.safeClick(button);
+        if (!clicked) {
+          continue;
+        }
+
+        this.stats.follows += 1;
+        this.stats.dailyFollows += 1;
+        this.updateStats();
+        await this.wait(1500, 2500);
+        return { success: true, reason: 'followed' };
+      }
+    }
+
+    return { success: false, reason: 'button-not-found' };
+  }
+
+  async processSearch(token) {
+    if (token !== this.runToken || !this.targetUsername) {
+      return;
+    }
+
+    this.sendStatusMessage(
+      `Processing ${this.targetUsername} (${this.searchIndex + 1}/${this.searchTotal || 1})...`
+    );
+
+    const result = await this.followCurrentProfile();
+    if (token !== this.runToken) {
+      return;
+    }
+
+    this.sendMessage({
+      type: 'SEARCH_STEP_RESULT',
+      sessionId: this.sessionId,
+      username: this.targetUsername,
+      success: result.success,
+      reason: result.reason,
+    });
+
+    this.isRunning = false;
+  }
+
+  async run(token) {
+    this.stats.sessionStartTime = Date.now();
+
+    if (!(await this.ensureModeContext())) {
+      return;
+    }
+
+    if (this.currentMode === 'search') {
+      await this.processSearch(token);
+      return;
+    }
+
+    while (this.isRunning && token === this.runToken) {
+      try {
+        if (this.currentMode === 'posts') {
+          await this.processPosts(token);
+        } else if (this.currentMode === 'reels') {
+          await this.processReels(token);
+        } else if (this.currentMode === 'stories') {
+          await this.processStories(token);
+        }
+
+        await this.wait(1500, 2500);
+      } catch (error) {
+        console.error('Automation loop error:', error);
+        this.sendStatusMessage('Encountered a page error, retrying...');
+        await this.wait(3000, 5000);
+      }
+    }
+  }
+
+  async start(payload) {
+    const incomingSessionId = payload.sessionId || null;
+    const stored = await this.getStorage(['activeSessionId', 'stats']);
+    const isResume = Boolean(incomingSessionId && stored.activeSessionId === incomingSessionId);
+
+    this.runToken += 1;
+    this.isRunning = true;
+    this.currentMode = payload.mode;
+    this.settings = payload.settings || {};
+    this.advancedSettings = payload.advancedSettings || {};
+    this.sessionId = incomingSessionId;
+    this.targetUsername = payload.targetUsername || null;
+    this.searchIndex = payload.searchIndex || 0;
+    this.searchTotal = payload.searchTotal || 0;
+
+    if (!isResume) {
+      this.currentReelState = null;
+      this.processedItems.clear();
+      this.resetSessionStats();
+    } else {
+      const storedStats = stored?.stats && typeof stored.stats === 'object' ? stored.stats : null;
+      if (storedStats) {
+        this.stats = {
+          ...this.stats,
+          ...storedStats,
+        };
+        this.updateStats();
+      }
+    }
+
+    chrome.storage.local.set({ activeSessionId: incomingSessionId });
+
+    this.sendMessage({
+      type: 'STATUS_UPDATE',
+      isRunning: true,
+    });
+
+    this.sendStatusMessage(`Preparing ${this.currentMode} automation...`);
+
+    const token = this.runToken;
+    try {
+      await this.run(token);
+    } catch (error) {
+      console.error('Failed to start automation:', error);
+      this.sendStatusMessage('Failed to start automation on this page.');
+    }
+  }
+
+  stop({ notify = true } = {}) {
+    this.isRunning = false;
+    this.runToken += 1;
+    this.currentReelState = null;
+    chrome.storage.local.set({ activeSessionId: null });
+
+    if (notify) {
+      this.sendMessage({
+        type: 'STATUS_UPDATE',
+        isRunning: false,
+      });
+      this.sendStatusMessage('Automation stopped.');
+    }
+  }
+}
+
+const bot = new InstagramAutomation();
+window.instagramBot = bot;
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'PING') {
+    sendResponse({ success: true, ready: true });
+    return true;
+  }
+
+  if (message.type === 'START_AUTOMATION') {
+    bot.start(message);
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (message.type === 'STOP_AUTOMATION') {
+    bot.stop();
+    sendResponse({ success: true });
+    return true;
+  }
+
+  return false;
+});
