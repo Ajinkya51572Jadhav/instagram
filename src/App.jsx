@@ -2,14 +2,18 @@ import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   Activity,
+  ChevronRight,
   Download,
   Film,
+  Gauge,
   Image,
   MessageCircle,
   Pause,
   Play,
   RotateCcw,
   Search,
+  ShieldCheck,
+  Sparkles,
   Settings as SettingsIcon,
   Upload,
 } from 'lucide-react';
@@ -235,6 +239,8 @@ function App() {
 
   const mode = MODE_CONFIG[selectedMode];
   const currentSettings = settings[selectedMode];
+  const enabledToggleCount = mode.toggles.filter((toggle) => Boolean(currentSettings[toggle.key])).length;
+  const progressPercent = followProgress.total ? Math.round((followProgress.current / followProgress.total) * 100) : 0;
   const statCards = useMemo(
     () => [
       { label: 'Scrolls', value: stats.scrolls, color: 'from-blue-500 to-cyan-500' },
@@ -378,30 +384,59 @@ function App() {
   };
 
   return (
-    <div className="min-h-screen w-[400px] bg-gradient-to-br from-slate-950 via-slate-900 to-purple-950 p-5">
-      <div className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4 shadow-xl backdrop-blur">
-        <div className="mb-4 flex items-start justify-between gap-3">
+    <div className="relative w-[440px] overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(99,102,241,0.22),_transparent_34%),linear-gradient(160deg,_#020617_0%,_#0b1120_42%,_#2e1065_100%)] p-3.5">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="absolute -left-10 top-5 h-28 w-28 rounded-full bg-fuchsia-500/20 blur-3xl" />
+        <div className="absolute right-0 top-28 h-32 w-32 rounded-full bg-cyan-400/15 blur-3xl" />
+        <div className="absolute bottom-20 left-20 h-36 w-36 rounded-full bg-violet-500/10 blur-3xl" />
+      </div>
+
+      <div className="relative mb-3 rounded-[24px] border border-white/12 bg-white/[0.07] p-3.5 shadow-[0_24px_80px_rgba(2,6,23,0.55)] backdrop-blur-xl">
+        <div className="mb-3 flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-fuchsia-500 to-violet-600">
+            <div className="flex h-12 w-12 items-center justify-center rounded-[18px] bg-gradient-to-br from-fuchsia-500 via-violet-500 to-indigo-500 shadow-[0_12px_30px_rgba(139,92,246,0.45)]">
               <Activity className="h-6 w-6 text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-semibold text-white">InstagramPro</h1>
-              <p className="text-xs text-slate-300">Automation launcher for posts, reels, stories, and search</p>
+              <div className="mb-0.5 flex items-center gap-2">
+                <h1 className="text-[26px] font-semibold leading-none tracking-tight text-white">InstagramPro</h1>
+                <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-200">
+                  Live
+                </span>
+              </div>
+              <p className="max-w-[290px] text-xs leading-5 text-slate-300">
+                Smarter automation for posts, reels, stories, and search.
+              </p>
             </div>
           </div>
-          <div className={`mt-1 h-3 w-3 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+          <div className="rounded-full border border-white/10 bg-white/5 px-2.5 py-2">
+            <div className={`h-3 w-3 rounded-full ${isRunning ? 'bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,0.9)] animate-pulse' : 'bg-slate-500'}`} />
+          </div>
         </div>
 
-        <div className="rounded-xl border border-white/10 bg-slate-950/40 p-3">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">Status</div>
-          <div className="text-sm text-slate-100">{statusMessage}</div>
+        <div className="mb-3 grid grid-cols-3 gap-2">
+          <InfoChip icon={Sparkles} label="Mode" value={mode.label} accent="violet" />
+          <InfoChip icon={ShieldCheck} label="Enabled" value={`${enabledToggleCount}/${mode.toggles.length}`} accent="emerald" />
+          <InfoChip icon={Gauge} label="State" value={isRunning ? 'Running' : 'Ready'} accent="sky" />
+        </div>
+
+        <div className="rounded-2xl border border-white/10 bg-slate-950/45 p-3">
+          <div className="mb-1.5 flex items-center justify-between">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">Status</div>
+            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-medium text-slate-300">
+              {mode.destination}
+            </span>
+          </div>
+          <div className="text-sm leading-5 text-slate-100">{statusMessage}</div>
         </div>
       </div>
 
-      <section className="mb-5">
-        <div className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Select Mode</div>
-        <div className="grid grid-cols-2 gap-3">
+      <section className="mb-3">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Select Mode</div>
+          <div className="text-[11px] font-medium text-slate-500">Pick the automation style</div>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
           {Object.entries(MODE_CONFIG).map(([modeId, config]) => {
             const Icon = config.icon;
             const isSelected = selectedMode === modeId;
@@ -410,30 +445,62 @@ function App() {
                 key={modeId}
                 type="button"
                 onClick={() => setSelectedMode(modeId)}
-                className={`rounded-2xl border p-4 text-left transition ${
+                className={`group rounded-[20px] border p-3 text-left transition duration-200 ${
                   isSelected
-                    ? `border-white/20 bg-gradient-to-br ${config.color} shadow-lg`
-                    : 'border-white/10 bg-white/5 hover:bg-white/10'
+                    ? `border-white/20 bg-gradient-to-br ${config.color} shadow-[0_18px_40px_rgba(15,23,42,0.35)]`
+                    : 'border-white/10 bg-white/[0.06] hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.09]'
                 }`}
               >
-                <Icon className={`mb-3 h-6 w-6 ${isSelected ? 'text-white' : 'text-slate-300'}`} />
+                <div className="mb-2 flex items-start justify-between">
+                  <div
+                    className={`flex h-10 w-10 items-center justify-center rounded-2xl ${
+                      isSelected ? 'bg-white/15 text-white' : 'bg-slate-900/70 text-slate-300'
+                    }`}
+                  >
+                    <Icon className="h-5 w-5" />
+                  </div>
+                </div>
                 <div className={`text-sm font-semibold ${isSelected ? 'text-white' : 'text-slate-100'}`}>{config.label}</div>
-                <div className={`mt-1 text-xs ${isSelected ? 'text-white/80' : 'text-slate-400'}`}>{config.destination}</div>
+                <div className={`mt-1 text-[10px] ${isSelected ? 'text-white/85' : 'text-slate-400'}`}>{config.toggles.length} tools</div>
+                <div className={`mt-1 flex items-center gap-1 text-[10px] font-medium ${isSelected ? 'text-white/90' : 'text-slate-500'}`}>
+                  Open
+                  <ChevronRight className={`h-3 w-3 transition ${isSelected ? 'translate-x-0.5' : 'group-hover:translate-x-0.5'}`} />
+                </div>
               </button>
             );
           })}
         </div>
       </section>
 
-      <section className="mb-5 rounded-2xl border border-white/10 bg-white/5 p-4">
-        <div className="mb-1 text-sm font-semibold text-white">{mode.label}</div>
-        <div className="mb-4 text-xs leading-5 text-slate-300">{mode.description}</div>
-
-        <div className="mb-3 rounded-xl border border-violet-400/20 bg-violet-500/10 p-3 text-xs text-violet-100">
-          Start flow: open Instagram, go to <span className="font-semibold">{mode.destination}</span>, then run the enabled actions below.
+      <section className="mb-3 rounded-[24px] border border-white/12 bg-white/[0.06] p-3.5 shadow-[0_18px_40px_rgba(15,23,42,0.3)] backdrop-blur-xl">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div>
+            <div className="mb-0.5 text-base font-semibold text-white">{mode.label}</div>
+            <div className="text-[11px] leading-4 text-slate-300">{mode.description}</div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-right">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Enabled</div>
+            <div className="text-sm font-semibold text-white">{enabledToggleCount}</div>
+          </div>
         </div>
 
-        <div className="space-y-3">
+        <div className="mb-3 rounded-2xl border border-violet-400/20 bg-gradient-to-r from-violet-500/12 to-fuchsia-500/12 p-2.5 text-[11px] text-violet-100">
+          Formula: <span className="font-semibold">Open</span>
+          {' -> '}
+          <span className="font-semibold">Wait</span>
+          {' -> '}
+          <span className="font-semibold">Action</span>
+          {' -> '}
+          <span className="font-semibold">Save</span>
+          {' -> '}
+          <span className="font-semibold">Move Next</span>
+        </div>
+
+        <div className="mb-3 rounded-2xl border border-white/10 bg-slate-950/35 p-2.5 text-[11px] leading-4 text-slate-300">
+          Start flow: open Instagram, go to <span className="font-semibold text-white">{mode.destination}</span>, then run the enabled actions below.
+        </div>
+
+        <div className="space-y-2">
           {mode.toggles.map((toggle) => (
             <ToggleControl
               key={toggle.key}
@@ -447,14 +514,14 @@ function App() {
         </div>
 
         {selectedMode === 'search' && (
-          <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/40 p-4">
-            <div className="mb-3 flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-300">
+          <div className="mt-3 rounded-[20px] border border-emerald-400/15 bg-gradient-to-br from-emerald-500/10 to-cyan-500/5 p-3">
+            <div className="mb-2 flex items-center gap-2.5">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-300">
                 <Upload className="h-5 w-5" />
               </div>
               <div>
-                <div className="text-sm font-medium text-white">Upload CSV or Excel</div>
-                <div className="text-xs text-slate-400">Accepted formats: CSV, TXT, XLS, XLSX</div>
+                <div className="text-sm font-medium text-white">Upload usernames</div>
+                <div className="text-[11px] text-slate-400">CSV, TXT, XLS, XLSX</div>
               </div>
             </div>
 
@@ -467,34 +534,34 @@ function App() {
             />
             <label
               htmlFor="search-upload"
-              className="block cursor-pointer rounded-xl bg-emerald-600 px-4 py-3 text-center text-sm font-medium text-white transition hover:bg-emerald-500"
+              className="block cursor-pointer rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-500 px-3 py-2.5 text-center text-sm font-medium text-white shadow-[0_12px_28px_rgba(16,185,129,0.3)] transition hover:from-emerald-400 hover:to-teal-400"
             >
               {csvFile || 'Choose File'}
             </label>
 
-            <div className="mt-3 flex items-center justify-between text-xs">
+            <div className="mt-2 flex items-center justify-between text-[11px]">
               <span className="text-slate-400">Loaded usernames</span>
               <span className="font-semibold text-emerald-300">{usernames.length}</span>
             </div>
 
             {usernames.length > 0 && (
-              <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-slate-300">
-                Preview: {usernames.slice(0, 6).join(', ')}
+              <div className="mt-2 rounded-2xl border border-white/10 bg-white/5 p-2.5 text-[11px] leading-4 text-slate-300">
+                Preview: {usernames.slice(0, 4).join(', ')}
                 {usernames.length > 6 ? '...' : ''}
               </div>
             )}
 
             {followProgress.total > 0 && (
-              <div className="mt-4">
-                <div className="mb-2 flex items-center justify-between text-xs text-slate-300">
+              <div className="mt-3">
+                <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-300">
                   <span>Follow progress</span>
-                  <span>
-                    {followProgress.current} / {followProgress.total}
+                  <span className="font-semibold text-emerald-200">
+                    {followProgress.current} / {followProgress.total} ({progressPercent}%)
                   </span>
                 </div>
-                <div className="h-2 w-full rounded-full bg-slate-700">
+                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-800/80">
                   <div
-                    className="h-2 rounded-full bg-emerald-500 transition-all"
+                    className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-teal-400 transition-all"
                     style={{
                       width: `${followProgress.total ? (followProgress.current / followProgress.total) * 100 : 0}%`,
                     }}
@@ -506,15 +573,18 @@ function App() {
         )}
       </section>
 
-      <section className="mb-5">
-        <div className="mb-3 text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Session Stats</div>
-        <div className="grid grid-cols-2 gap-3">
+      <section className="mb-3">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Session Stats</div>
+          <div className="text-[11px] text-slate-500">Live numbers</div>
+        </div>
+        <div className="grid grid-cols-4 gap-2">
           {statCards.map((card) => (
             <StatCard key={card.label} label={card.label} value={card.value} color={card.color} />
           ))}
         </div>
-        <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <div className="mb-3 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Daily Limits</div>
+        <div className="mt-2 rounded-[20px] border border-white/12 bg-white/[0.06] p-3">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Daily Limits</div>
           <div className="space-y-3">
             <LimitBar label="Likes Today" current={stats.dailyLikes || 0} max={advancedSettings.dailyLikeLimit} />
             <LimitBar label="Follows Today" current={stats.dailyFollows || 0} max={advancedSettings.dailyFollowLimit} />
@@ -522,42 +592,42 @@ function App() {
         </div>
       </section>
 
-      <section className="grid grid-cols-4 gap-3">
+      <section className="grid grid-cols-4 gap-2">
         <button
           type="button"
           onClick={handleExport}
-          className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 py-3 text-white transition hover:bg-white/10"
+          className="flex flex-col items-center justify-center gap-1.5 rounded-[20px] border border-white/10 bg-white/[0.06] py-2.5 text-white transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.1]"
         >
-          <Download className="h-5 w-5" />
-          <span className="text-xs font-medium">Export</span>
+          <Download className="h-4.5 w-4.5" />
+          <span className="text-[11px] font-medium">Export</span>
         </button>
         <button
           type="button"
           onClick={() => setShowSettings(true)}
-          className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 py-3 text-white transition hover:bg-white/10"
+          className="flex flex-col items-center justify-center gap-1.5 rounded-[20px] border border-white/10 bg-white/[0.06] py-2.5 text-white transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.1]"
         >
-          <SettingsIcon className="h-5 w-5" />
-          <span className="text-xs font-medium">Settings</span>
+          <SettingsIcon className="h-4.5 w-4.5" />
+          <span className="text-[11px] font-medium">Settings</span>
         </button>
         <button
           type="button"
           onClick={handleRefreshReset}
-          className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 py-3 text-white transition hover:bg-white/10"
+          className="flex flex-col items-center justify-center gap-1.5 rounded-[20px] border border-white/10 bg-white/[0.06] py-2.5 text-white transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.1]"
         >
-          <RotateCcw className="h-5 w-5" />
-          <span className="text-xs font-medium">Refresh</span>
+          <RotateCcw className="h-4.5 w-4.5" />
+          <span className="text-[11px] font-medium">Refresh</span>
         </button>
         <button
           type="button"
           onClick={handleStartStop}
-          className={`flex flex-col items-center justify-center gap-2 rounded-2xl py-3 text-white transition ${
+          className={`flex flex-col items-center justify-center gap-1.5 rounded-[20px] py-2.5 text-white shadow-[0_14px_28px_rgba(88,28,135,0.28)] transition ${
             isRunning
               ? 'bg-red-600 hover:bg-red-500'
               : 'bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500'
           }`}
         >
-          {isRunning ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
-          <span className="text-xs font-semibold">{isRunning ? 'Stop' : 'Start'}</span>
+          {isRunning ? <Pause className="h-4.5 w-4.5" /> : <Play className="h-4.5 w-4.5" />}
+          <span className="text-[11px] font-semibold">{isRunning ? 'Stop' : 'Start'}</span>
         </button>
       </section>
 
@@ -579,21 +649,45 @@ function App() {
 
 function ToggleControl({ icon, label, desc, checked, onChange }) {
   return (
-    <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/5 p-4">
+    <div className="flex items-center justify-between rounded-[20px] border border-white/10 bg-white/[0.06] p-3 transition hover:border-white/20 hover:bg-white/[0.09]">
       <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-800 text-lg">{icon}</div>
+        <div
+          className={`flex h-9 w-9 items-center justify-center rounded-2xl text-base transition ${
+            checked
+              ? 'bg-gradient-to-br from-violet-500/80 to-fuchsia-500/80 text-white shadow-[0_12px_24px_rgba(139,92,246,0.35)]'
+              : 'bg-slate-800/80 text-slate-300'
+          }`}
+        >
+          {icon}
+        </div>
         <div>
-          <div className="text-sm font-medium text-white">{label}</div>
-          <div className="text-xs text-slate-400">{desc}</div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium text-white">{label}</div>
+            <span
+              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${
+                checked ? 'bg-emerald-400/15 text-emerald-200' : 'bg-slate-700/70 text-slate-400'
+              }`}
+            >
+              {checked ? 'On' : 'Off'}
+            </span>
+          </div>
+          <div className="text-[11px] leading-4 text-slate-400">{desc}</div>
         </div>
       </div>
       <button
         type="button"
         onClick={onChange}
-        className={`relative h-7 w-12 rounded-full transition ${checked ? 'bg-violet-600' : 'bg-slate-600'}`}
+        aria-pressed={checked}
+        className={`relative h-8 w-14 rounded-full border transition ${
+          checked
+            ? 'border-violet-300/30 bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-[0_10px_22px_rgba(139,92,246,0.45)]'
+            : 'border-white/10 bg-slate-700/90'
+        }`}
       >
         <span
-          className={`absolute top-1 h-5 w-5 rounded-full bg-white transition ${checked ? 'translate-x-6' : 'translate-x-1'}`}
+          className={`absolute top-1 flex h-6 w-6 items-center justify-center rounded-full bg-white text-[9px] font-bold text-slate-900 shadow-md transition ${
+            checked ? 'translate-x-7' : 'translate-x-1'
+          }`}
         />
       </button>
     </div>
@@ -602,9 +696,9 @@ function ToggleControl({ icon, label, desc, checked, onChange }) {
 
 function StatCard({ label, value, color }) {
   return (
-    <div className={`rounded-2xl bg-gradient-to-br ${color} p-4 text-center shadow`}>
-      <div className="text-2xl font-bold text-white">{value}</div>
-      <div className="mt-1 text-xs text-white/80">{label}</div>
+    <div className={`rounded-[20px] bg-gradient-to-br ${color} p-2.5 text-center shadow-[0_16px_30px_rgba(15,23,42,0.28)]`}>
+      <div className="text-[24px] font-bold leading-none text-white">{value}</div>
+      <div className="mt-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-white/80">{label}</div>
     </div>
   );
 }
@@ -615,15 +709,15 @@ function LimitBar({ label, current, max }) {
 
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-xs">
+      <div className="mb-1 flex items-center justify-between text-[11px]">
         <span className="text-slate-300">{label}</span>
         <span className={isNearLimit ? 'font-semibold text-red-400' : 'font-semibold text-emerald-300'}>
           {current} / {max}
         </span>
       </div>
-      <div className="h-2 w-full rounded-full bg-slate-700">
+      <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700/80">
         <div
-          className={`h-2 rounded-full transition-all ${isNearLimit ? 'bg-red-500' : 'bg-emerald-500'}`}
+          className={`h-full rounded-full transition-all ${isNearLimit ? 'bg-gradient-to-r from-red-500 to-rose-400' : 'bg-gradient-to-r from-emerald-400 to-cyan-400'}`}
           style={{ width: `${percentage}%` }}
         />
       </div>
@@ -654,11 +748,19 @@ function SettingsModal({ settings, onSave, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-3xl border border-white/10 bg-slate-900 p-6 shadow-2xl">
-        <h2 className="mb-4 text-lg font-semibold text-white">Advanced Settings</h2>
+      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,_rgba(15,23,42,0.98),_rgba(51,24,88,0.96))] p-6 shadow-[0_24px_90px_rgba(2,6,23,0.7)]">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Advanced Settings</h2>
+            <div className="text-xs text-slate-400">Tune speed, safety, and usage limits.</div>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
+            Control
+          </div>
+        </div>
 
         <div className="space-y-4">
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="rounded-[24px] border border-white/10 bg-white/[0.06] p-4">
             <div className="mb-3 text-sm font-semibold text-white">Timing</div>
             <div className="space-y-3">
               <NumberRangeField
@@ -678,7 +780,7 @@ function SettingsModal({ settings, onSave, onClose }) {
             </div>
           </div>
 
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="rounded-[24px] border border-white/10 bg-white/[0.06] p-4">
             <div className="mb-3 text-sm font-semibold text-white">Safety</div>
             <div className="space-y-3">
               <NumberField
@@ -704,14 +806,14 @@ function SettingsModal({ settings, onSave, onClose }) {
           <button
             type="button"
             onClick={onClose}
-            className="rounded-2xl border border-white/10 bg-white/5 py-3 text-sm font-medium text-white transition hover:bg-white/10"
+            className="rounded-[24px] border border-white/10 bg-white/[0.06] py-3 text-sm font-medium text-white transition hover:bg-white/[0.1]"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={() => onSave(localSettings)}
-            className="rounded-2xl bg-violet-600 py-3 text-sm font-medium text-white transition hover:bg-violet-500"
+            className="rounded-[24px] bg-gradient-to-r from-fuchsia-600 to-violet-600 py-3 text-sm font-medium text-white transition hover:from-fuchsia-500 hover:to-violet-500"
           >
             Save
           </button>
@@ -730,14 +832,14 @@ function NumberRangeField({ label, min, max, onMinChange, onMaxChange }) {
           type="number"
           value={min}
           onChange={(event) => onMinChange(event.target.value)}
-          className="rounded-xl border border-white/10 bg-slate-800 px-3 py-2 text-sm text-white"
+          className="rounded-2xl border border-white/10 bg-slate-800/90 px-3 py-2.5 text-sm text-white outline-none transition focus:border-violet-400/60 focus:ring-2 focus:ring-violet-500/20"
           placeholder="Min"
         />
         <input
           type="number"
           value={max}
           onChange={(event) => onMaxChange(event.target.value)}
-          className="rounded-xl border border-white/10 bg-slate-800 px-3 py-2 text-sm text-white"
+          className="rounded-2xl border border-white/10 bg-slate-800/90 px-3 py-2.5 text-sm text-white outline-none transition focus:border-violet-400/60 focus:ring-2 focus:ring-violet-500/20"
           placeholder="Max"
         />
       </div>
@@ -753,8 +855,26 @@ function NumberField({ label, value, onChange }) {
         type="number"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-xl border border-white/10 bg-slate-800 px-3 py-2 text-sm text-white"
+        className="w-full rounded-2xl border border-white/10 bg-slate-800/90 px-3 py-2.5 text-sm text-white outline-none transition focus:border-violet-400/60 focus:ring-2 focus:ring-violet-500/20"
       />
+    </div>
+  );
+}
+
+function InfoChip({ icon: Icon, label, value, accent = 'violet' }) {
+  const accentClasses = {
+    violet: 'from-violet-500/20 to-fuchsia-500/10 text-violet-100',
+    emerald: 'from-emerald-500/20 to-teal-500/10 text-emerald-100',
+    sky: 'from-sky-500/20 to-cyan-500/10 text-sky-100',
+  };
+
+  return (
+    <div className={`rounded-2xl border border-white/10 bg-gradient-to-br ${accentClasses[accent] || accentClasses.violet} p-3`}>
+      <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">
+        <Icon className="h-3.5 w-3.5" />
+        {label}
+      </div>
+      <div className="text-sm font-semibold text-white">{value}</div>
     </div>
   );
 }

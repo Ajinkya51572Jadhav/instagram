@@ -14,10 +14,13 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  width: 400px;
-  min-height: 600px;
-  background: #0f172a;
+  width: 440px;
+  min-height: 560px;
+  background:
+    radial-gradient(circle at top, rgba(99, 102, 241, 0.18), transparent 34%),
+    linear-gradient(160deg, #020617 0%, #0b1120 42%, #2e1065 100%);
   color: white;
+  overflow-x: hidden;
 }
 
 #root {
@@ -25,20 +28,26 @@ body {
   height: 100%;
 }
 
+::selection {
+  background: rgba(168, 85, 247, 0.35);
+  color: #fff;
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #1e293b;
+  background: rgba(15, 23, 42, 0.9);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #7c3aed 0%, #2563eb 100%);
+  border-radius: 999px;
+  border: 2px solid rgba(15, 23, 42, 0.95);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
+  background: linear-gradient(180deg, #8b5cf6 0%, #38bdf8 100%);
 }

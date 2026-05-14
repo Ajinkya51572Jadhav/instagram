@@ -539,6 +539,150 @@ class InstagramAutomation {
       .toLowerCase();
   }
 
+  isUnavailablePage() {
+    const pageText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!pageText) {
+      return false;
+    }
+
+    return (
+      pageText.includes("sorry, this page isn't available") ||
+      pageText.includes('the link you followed may be broken, or the page may have been removed')
+    );
+  }
+
+  getFollowButtonState() {
+    const candidates = [
+      ...document.querySelectorAll('header button, header div[role="button"], header span[role="button"]'),
+      ...document.querySelectorAll('main button, main div[role="button"], main span[role="button"]'),
+      ...document.querySelectorAll('button, div[role="button"], span[role="button"]'),
+    ];
+    const seen = new Set();
+    let followCandidate = null;
+    let followBackCandidate = null;
+
+    for (const candidate of candidates) {
+      const button = candidate.closest?.('button, div[role="button"], span[role="button"]') || candidate;
+      if (!button || seen.has(button) || this.getVisibleArea(button) <= 0) {
+        continue;
+      }
+      seen.add(button);
+
+      const text = this.getNodeIntentText(button).replace(/\s+/g, ' ').trim();
+      if (!text) {
+        continue;
+      }
+
+      if (/\brequested\b/.test(text)) {
+        return { status: 'requested', button };
+      }
+
+      if (/\bfollowing\b/.test(text)) {
+        return { status: 'following', button };
+      }
+
+      if (/\bfollow back\b/.test(text)) {
+        followBackCandidate ||= button;
+        continue;
+      }
+
+      if (/(^|\s)follow(\s|$)/.test(text)) {
+        followCandidate ||= button;
+      }
+    }
+
+    if (followBackCandidate) {
+      return { status: 'follow', button: followBackCandidate };
+    }
+
+    if (followCandidate) {
+      return { status: 'follow', button: followCandidate };
+    }
+
+    return { status: 'button-not-found', button: null };
+  }
+
+  async waitForFollowConfirmation(timeoutMs = 9000) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const state = this.getFollowButtonState();
+      if (['following', 'requested'].includes(state.status)) {
+        return state;
+      }
+
+      await this.wait(500, 900);
+    }
+
+    return this.getFollowButtonState();
+  }
+
+  extractSearchProfileData(targetUsername, result = {}) {
+    const profileUrl = this.normalizeInstagramUrl(window.location.href) || window.location.href;
+    const pageText = document.body?.innerText || '';
+    const nameCandidate =
+      [...document.querySelectorAll('header h1, header h2, main h1, main h2')]
+        .map((node) => node.textContent?.trim())
+        .find((text) => text && text.length <= 120) || null;
+    const bioCandidate =
+      [...document.querySelectorAll('header section span, header div span[dir="auto"], main section span, main div span[dir="auto"]')]
+        .map((node) => node.textContent?.trim())
+        .filter((text) => text && text.length > 1 && text.length <= 300)
+        .sort((left, right) => right.length - left.length)[0] || null;
+
+    return {
+      platform: 'instagram',
+      contentType: 'search_profile',
+      timestamp: new Date().toISOString(),
+      username: targetUsername,
+      channelName: targetUsername,
+      profileUrl,
+      profileName: nameCandidate,
+      caption: bioCandidate,
+      followSuccess: Boolean(result.success),
+      followResult: result.reason || 'unknown',
+      pageUnavailable: Boolean(this.isUnavailablePage()),
+      uniqueKey: `search:${targetUsername}`,
+      pageTextPreview: pageText.replace(/\s+/g, ' ').trim().slice(0, 200) || null,
+    };
+  }
+
+  getSearchProfileRoot() {
+    return document.querySelector('main header') || document.querySelector('header') || document.querySelector('main') || document.body;
+  }
+
+  async humanizeSearchProfileVisit(stage = 'browse', button = null, token = this.runToken) {
+    if (token !== this.runToken) {
+      return false;
+    }
+
+    const root = button || this.getSearchProfileRoot();
+    const ranges = {
+      browse: { min: 3200, max: 6200 },
+      preClick: { min: 900, max: 1800 },
+      postAction: { min: 5000, max: 9000 },
+      skipAction: { min: 2600, max: 4600 },
+    };
+    const delay = ranges[stage] || ranges.browse;
+
+    root?.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+    await this.wait(500, 1100);
+    if (token !== this.runToken) {
+      return false;
+    }
+
+    const scrollOffset = Math.round((Math.random() - 0.5) * 180);
+    window.scrollBy({ top: scrollOffset, left: 0, behavior: 'smooth' });
+    await this.wait(450, 900);
+    if (token !== this.runToken) {
+      return false;
+    }
+
+    await this.mimicHumanPresence(root);
+    await this.wait(delay.min, delay.max);
+    return token === this.runToken;
+  }
+
   hasUnlikeIntent(node) {
     const directText = [
       node?.getAttribute?.('aria-label'),
@@ -2098,6 +2242,7 @@ class InstagramAutomation {
         tree: null,
       };
     }
+    const storyState = this.currentStoryState;
 
     this.sendStatusMessage(
       readyState.ready
@@ -2109,20 +2254,27 @@ class InstagramAutomation {
       return;
     }
 
-    if (!this.currentStoryState.viewed) {
+    if (!storyState.viewed) {
       await this.pauseBeforeStoryInteraction(snapshot, token);
-      this.currentStoryState.viewed = true;
+      if (token !== this.runToken || this.currentStoryState !== storyState) {
+        return;
+      }
+      storyState.viewed = true;
     }
 
     if (!this.processedItems.has(itemId)) {
-      this.currentStoryState.tree = this.registerStoryTree(snapshot);
-      this.currentStoryState.alreadyLiked = this.isAlreadyLiked(snapshot.root);
+      storyState.tree = this.registerStoryTree(snapshot);
+      storyState.alreadyLiked = this.isAlreadyLiked(snapshot.root);
 
-      if (!this.currentStoryState.alreadyLiked && this.settings.autoLike) {
-        this.currentStoryState.liked = await this.likeCurrentItem(snapshot.root);
+      if (!storyState.alreadyLiked && this.settings.autoLike) {
+        const liked = await this.likeCurrentItem(snapshot.root);
+        if (token !== this.runToken || this.currentStoryState !== storyState) {
+          return;
+        }
+        storyState.liked = liked;
       }
 
-      if (this.settings.dataScrape && !this.currentStoryState.scraped) {
+      if (this.settings.dataScrape && !storyState.scraped) {
         const storyData = {
           platform: 'instagram',
           contentType: 'story',
@@ -2139,59 +2291,73 @@ class InstagramAutomation {
           storyItemId: itemId,
           storyMediaType: snapshot.mediaType,
           uniqueKey: itemId,
-          autoLiked: Boolean(this.currentStoryState.liked),
-          autoAlreadyLiked: Boolean(this.currentStoryState.alreadyLiked),
+          autoLiked: Boolean(storyState.liked),
+          autoAlreadyLiked: Boolean(storyState.alreadyLiked),
           autoAdvanced: Boolean(this.settings.autoScroll),
-          ...this.currentStoryState.tree,
+          ...storyState.tree,
         };
-        this.currentStoryState.scraped = Boolean(await this.saveScrapedData(storyData));
+        const scraped = await this.saveScrapedData(storyData);
+        if (token !== this.runToken || this.currentStoryState !== storyState) {
+          return;
+        }
+        storyState.scraped = Boolean(scraped);
       }
 
       this.processedItems.add(itemId);
     }
 
     await this.finishStoryView(snapshot, token);
-    if (token === this.runToken) {
+    if (token === this.runToken && this.currentStoryState === storyState) {
       const moved = await this.advanceStory();
-      if (moved) {
+      if (token === this.runToken && this.currentStoryState === storyState && moved) {
         this.currentStoryState = null;
       }
     }
   }
 
-  async followCurrentProfile() {
+  async followCurrentProfile(token = this.runToken) {
     if (!this.settings.autoFollow || !this.checkDailyLimit('follow')) {
       return { success: false, reason: 'follow-disabled-or-limit' };
     }
 
     await this.wait(1800, 3200);
-    const buttons = [...document.querySelectorAll('button, div[role="button"]')];
-
-    for (const button of buttons) {
-      const text = button.textContent?.trim().toLowerCase();
-      if (!text) {
-        continue;
-      }
-
-      if (['following', 'requested'].includes(text)) {
-        return { success: false, reason: text };
-      }
-
-      if (text === 'follow' || text === 'follow back') {
-        const clicked = this.safeClick(button);
-        if (!clicked) {
-          continue;
-        }
-
-        this.stats.follows += 1;
-        this.stats.dailyFollows += 1;
-        this.updateStats();
-        await this.wait(1500, 2500);
-        return { success: true, reason: 'followed' };
-      }
+    if (token !== this.runToken) {
+      return { success: false, reason: 'cancelled' };
     }
 
-    return { success: false, reason: 'button-not-found' };
+    if (this.isUnavailablePage()) {
+      return { success: false, reason: 'profile-unavailable' };
+    }
+
+    const initialState = this.getFollowButtonState();
+    if (['following', 'requested'].includes(initialState.status)) {
+      return { success: false, reason: initialState.status };
+    }
+
+    if (initialState.status !== 'follow' || !initialState.button) {
+      return { success: false, reason: initialState.status };
+    }
+
+    this.sendStatusMessage(`Reviewing ${this.targetUsername} before follow request...`);
+    await this.humanizeSearchProfileVisit('preClick', initialState.button, token);
+    if (token !== this.runToken) {
+      return { success: false, reason: 'cancelled' };
+    }
+
+    const clicked = this.safeClick(initialState.button);
+    if (!clicked) {
+      return { success: false, reason: 'follow-click-failed' };
+    }
+
+    const confirmedState = await this.waitForFollowConfirmation();
+    if (!['following', 'requested'].includes(confirmedState.status)) {
+      return { success: false, reason: confirmedState.status === 'follow' ? 'follow-not-confirmed' : confirmedState.status };
+    }
+
+    this.stats.follows += 1;
+    this.stats.dailyFollows += 1;
+    this.updateStats();
+    return { success: true, reason: confirmedState.status };
   }
 
   async processSearch(token) {
@@ -2203,7 +2369,28 @@ class InstagramAutomation {
       `Processing ${this.targetUsername} (${this.searchIndex + 1}/${this.searchTotal || 1})...`
     );
 
-    const result = await this.followCurrentProfile();
+    this.sendStatusMessage(`Waiting on ${this.targetUsername}'s page before any action...`);
+    await this.humanizeSearchProfileVisit('browse', null, token);
+    if (token !== this.runToken) {
+      return;
+    }
+
+    const result = await this.followCurrentProfile(token);
+    if (token !== this.runToken) {
+      return;
+    }
+
+    await this.saveScrapedData(this.extractSearchProfileData(this.targetUsername, result));
+    if (token !== this.runToken) {
+      return;
+    }
+
+    this.sendStatusMessage(
+      result.success
+        ? `Follow request recorded for ${this.targetUsername}. Waiting before next username...`
+        : `No follow action for ${this.targetUsername} (${result.reason}). Waiting before next username...`
+    );
+    await this.humanizeSearchProfileVisit(result.success ? 'postAction' : 'skipAction', null, token);
     if (token !== this.runToken) {
       return;
     }
