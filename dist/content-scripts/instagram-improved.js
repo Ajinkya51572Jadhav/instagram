@@ -12,7 +12,10 @@ class InstagramAutomation {
     this.searchIndex = 0;
     this.searchTotal = 0;
     this.processedItems = new Set();
+    this.currentPostState = null;
+    this.currentStoryState = null;
     this.currentReelState = null;
+    this.storyTrees = new Map();
     this.stats = {
       scrolls: 0,
       likes: 0,
@@ -430,6 +433,22 @@ class InstagramAutomation {
     return fallback;
   }
 
+  getCurrentItemLabel() {
+    if (this.currentMode === 'stories') {
+      return 'story';
+    }
+
+    if (this.currentMode === 'posts') {
+      return 'post';
+    }
+
+    if (this.currentMode === 'reels') {
+      return 'reel';
+    }
+
+    return 'item';
+  }
+
   async saveScrapedData(data) {
     if (!data?.username || data.username === 'unknown_user') {
       return false;
@@ -442,7 +461,9 @@ class InstagramAutomation {
         data.contentType || '',
         data.username || '',
         data.postUrl || data.storyUrl || '',
+        data.videoUrl || data.imageUrl || '',
         data.audioName || '',
+        data.storyTreePath || data.storyItemId || data.uniqueKey || '',
       ].join('|');
 
       const alreadySaved = scrapedData.some((item) => {
@@ -450,7 +471,9 @@ class InstagramAutomation {
           item?.contentType || '',
           item?.username || '',
           item?.postUrl || item?.storyUrl || '',
+          item?.videoUrl || item?.imageUrl || '',
           item?.audioName || '',
+          item?.storyTreePath || item?.storyItemId || item?.uniqueKey || '',
         ].join('|');
         return itemId === entryId;
       });
@@ -882,7 +905,7 @@ class InstagramAutomation {
     this.stats.likes += 1;
     this.stats.dailyLikes += 1;
     this.updateStats();
-    this.sendStatusMessage(`Liked ${this.currentMode.slice(0, -1) || 'item'}.`);
+    this.sendStatusMessage(`Liked ${this.getCurrentItemLabel()}.`);
     return true;
   }
 
@@ -1187,10 +1210,157 @@ class InstagramAutomation {
     }
   }
 
+  isStoryPageLocation() {
+    return window.location.pathname.startsWith('/stories/');
+  }
+
+  getTopStoryTrayLink() {
+    const links = [...document.querySelectorAll('a[href^="/stories/"]')];
+    const matches = links
+      .map((link) => {
+        const rect = link.getBoundingClientRect?.();
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+          return null;
+        }
+
+        const visibleArea = this.getVisibleArea(link);
+        if (visibleArea <= 0) {
+          return null;
+        }
+
+        const nearTop = rect.top < Math.max(window.innerHeight * 0.35, 260);
+        const reasonableSize = rect.width >= 36 && rect.height >= 36 && rect.width <= 180 && rect.height <= 180;
+        const href = link.getAttribute('href') || '';
+        if (!href.startsWith('/stories/') || !nearTop || !reasonableSize) {
+          return null;
+        }
+
+        const score = 1000000 + visibleArea - rect.left * 10 - Math.abs(rect.top) * 8;
+        return { link, score };
+      })
+      .filter(Boolean);
+
+    matches.sort((left, right) => right.score - left.score);
+    return matches[0]?.link || null;
+  }
+
+  getStoryTrayTarget() {
+    const rawCandidates = [
+      ...document.querySelectorAll('a[href^="/stories/"]'),
+      ...document.querySelectorAll('div[role="button"] a[href^="/stories/"]'),
+      ...document.querySelectorAll('button img, a img, div[role="button"] img'),
+      ...document.querySelectorAll('canvas[style*="cursor: pointer"], header canvas, section canvas'),
+      ...document.querySelectorAll('button[aria-label*="story" i], div[role="button"][aria-label*="story" i]'),
+    ];
+
+    const seen = new Set();
+    const matches = [];
+    for (const candidate of rawCandidates) {
+      const clickable =
+        candidate?.closest?.('a[href^="/stories/"], button, div[role="button"], li, article') ||
+        candidate;
+      if (!clickable || seen.has(clickable)) {
+        continue;
+      }
+      seen.add(clickable);
+
+      const rect = clickable.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
+
+      const visibleArea = this.getVisibleArea(clickable);
+      if (visibleArea <= 0) {
+        continue;
+      }
+
+      const href = clickable.getAttribute?.('href') || clickable.querySelector?.('a[href^="/stories/"]')?.getAttribute?.('href') || '';
+      const nearTop = rect.top < Math.max(window.innerHeight * 0.35, 260);
+      const nearLeft = rect.left < window.innerWidth * 0.65;
+      const hasStoryHref = href.startsWith('/stories/');
+      const hasStoryMedia = Boolean(candidate.tagName === 'CANVAS' || clickable.querySelector?.('canvas, img'));
+      const reasonableSize = rect.width >= 36 && rect.height >= 36 && rect.width <= 220 && rect.height <= 220;
+      if (!nearTop || !reasonableSize) {
+        continue;
+      }
+      const score =
+        (hasStoryHref ? 1000000 : 0) +
+        (nearTop ? 300000 : 0) +
+        (nearLeft ? 80000 : 0) +
+        (hasStoryMedia ? 30000 : 0) +
+        visibleArea -
+        rect.left * 10 -
+        Math.abs(rect.top) * 8;
+
+      matches.push({ clickable, score });
+    }
+
+    matches.sort((left, right) => right.score - left.score);
+    return matches[0]?.clickable || null;
+  }
+
+  getStoryNavigationButton(direction = 'next') {
+    const wantPrevious = direction === 'previous';
+    const viewerRoot = this.getStoryViewerRoot();
+    const viewportMidX = window.innerWidth / 2;
+    const candidates = [
+      ...document.querySelectorAll('button, div[role="button"], svg[aria-label], title'),
+    ];
+    const seen = new Set();
+    const matches = [];
+
+    for (const candidate of candidates) {
+      const button = candidate.closest?.('button, div[role="button"]') || candidate.parentElement?.closest?.('button, div[role="button"]');
+      if (!button || seen.has(button) || this.getVisibleArea(button) <= 0) {
+        continue;
+      }
+      seen.add(button);
+
+      const rect = button.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0 || rect.top >= window.innerHeight * 0.95) {
+        continue;
+      }
+
+      const intentText = [this.getNodeIntentText(button), this.getNodeIntentText(candidate)].join(' ').trim();
+      const matchesDirection = wantPrevious
+        ? /\b(previous|prev|back|left chevron)\b/i.test(intentText)
+        : /\b(next|forward|right chevron)\b/i.test(intentText);
+      if (!matchesDirection) {
+        continue;
+      }
+
+      const center = this.getElementCenter(button);
+      const insideViewer = Boolean(viewerRoot && viewerRoot !== document && viewerRoot.contains(button));
+      const horizontalBias = wantPrevious ? Math.max(0, viewportMidX - center.x) : Math.max(0, center.x - viewportMidX);
+      const edgeBias = wantPrevious ? Math.max(0, window.innerWidth * 0.45 - center.x) : Math.max(0, center.x - window.innerWidth * 0.55);
+      const score =
+        (insideViewer ? 1000000 : 0) +
+        this.getVisibleArea(button) +
+        horizontalBias * 200 -
+        edgeBias * 25 -
+        Math.abs(center.y - window.innerHeight * 0.45) * 10;
+
+      matches.push({ button, score });
+    }
+
+    matches.sort((left, right) => right.score - left.score);
+    return matches[0]?.button || null;
+  }
+
   isStoryViewerOpen() {
-    return Boolean(
-      document.querySelector('div[role="dialog"] button[aria-label="Close"], button[aria-label="Close"]')
-    );
+    if (this.isStoryPageLocation()) {
+      const hasStoryMedia = Boolean(this.getCurrentStoryMedia(document).media);
+      const hasStoryNav = Boolean(
+        this.getStoryNavigationButton('next') ||
+          this.getStoryNavigationButton('previous') ||
+          document.querySelector('div[role="progressbar"], [role="slider"][aria-label*="volume" i], a[href^="/stories/"]')
+      );
+      if (hasStoryMedia || hasStoryNav) {
+        return true;
+      }
+    }
+
+    return Boolean(document.querySelector('div[role="dialog"] button[aria-label="Close"], button[aria-label="Close"]'));
   }
 
   async openStoryViewer() {
@@ -1198,53 +1368,489 @@ class InstagramAutomation {
       return true;
     }
 
-    const candidates = [
-      ...document.querySelectorAll('a[href^="/stories/"]'),
-      ...document.querySelectorAll('canvas[style*="cursor: pointer"]'),
-      ...document.querySelectorAll('button img[alt*="story" i], a img[alt*="story" i]'),
-    ];
+    const topStoryLink = this.getTopStoryTrayLink();
+    if (topStoryLink) {
+      const href = topStoryLink.getAttribute?.('href') || '';
+      if (href.startsWith('/stories/')) {
+        this.sendStatusMessage('Opening top story from Instagram story tray...');
+        window.location.assign(this.normalizeInstagramUrl(href) || `https://www.instagram.com${href}`);
+        return false;
+      }
+    }
 
-    const clickable = candidates
-      .map((candidate) => candidate.closest('a, button, div[role="button"]') || candidate)
-      .find(Boolean);
+    const clickable = this.getStoryTrayTarget();
 
-    if (!clickable) {
+    if (!clickable && !topStoryLink) {
       return false;
     }
 
-    this.safeClick(clickable);
-    await this.wait(1800, 2800);
+    if (clickable) {
+      await this.clickElementReliably(clickable);
+      await this.wait(2200, 3400);
+      if (this.isStoryViewerOpen()) {
+        return true;
+      }
+    }
+
+    const href =
+      clickable?.getAttribute?.('href') ||
+      clickable?.querySelector?.('a[href^="/stories/"]')?.getAttribute?.('href') ||
+      '';
+    if (href.startsWith('/stories/')) {
+      this.sendStatusMessage('Opening top story from story tray...');
+      window.location.assign(this.normalizeInstagramUrl(href) || `https://www.instagram.com${href}`);
+      return false;
+    }
+
+    await this.wait(2200, 3400);
     return this.isStoryViewerOpen();
   }
 
   async advanceStory() {
     if (!this.settings.autoScroll) {
-      return;
+      return false;
     }
 
-    const nextButton = document.querySelector('button[aria-label="Next"], button[aria-label="Next story"]');
+    const previousIdentity = this.getCurrentStorySnapshot().id;
+    let moved = false;
+    const nextButton = this.getStoryNavigationButton('next');
     if (nextButton) {
-      this.safeClick(nextButton);
-    } else {
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'ArrowRight',
-          code: 'ArrowRight',
-          keyCode: 39,
-          which: 39,
-          bubbles: true,
-        })
-      );
+      await this.clickElementReliably(nextButton);
+      moved = await this.waitForStoryChange(previousIdentity, 10);
+    }
+
+    if (!moved) {
+      const titleNode = [...document.querySelectorAll('title')].find((node) => this.getElementText(node) === 'next');
+      const titleButton = titleNode?.closest?.('button, div[role="button"]') || titleNode?.parentElement?.closest?.('button, div[role="button"]');
+      if (titleButton && this.getVisibleArea(titleButton) > 0) {
+        const clicked = await this.clickElementReliably(titleButton);
+        if (clicked) {
+          moved = await this.waitForStoryChange(previousIdentity, 10);
+        }
+      }
+    }
+
+    if (!moved) {
+      const viewer = this.getStoryViewerRoot();
+      const rect = viewer?.getBoundingClientRect?.();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        const clickX = Math.round(rect.left + rect.width * 0.88);
+        const clickY = Math.round(rect.top + rect.height * 0.5);
+        const target = document.elementFromPoint(clickX, clickY);
+        const clicked = await this.clickElementReliably(target?.closest?.('button, a, div[role="button"]') || target);
+        if (clicked) {
+          moved = await this.waitForStoryChange(previousIdentity, 10);
+        }
+      }
+    }
+
+    if (!moved) {
+      this.dispatchNavigationKey('ArrowRight', 'ArrowRight', 39);
+      moved = await this.waitForStoryChange(previousIdentity, 10);
+    }
+
+    if (!moved) {
+      this.sendStatusMessage('Could not move to the next story yet.');
+      return false;
     }
 
     this.stats.scrolls += 1;
     this.updateStats();
-    await this.wait(1500, 2500);
+    await this.wait(1200, 2200);
+    return true;
+  }
+
+  getStoryViewerRoot() {
+    const dialog = document.querySelector('div[role="dialog"]');
+    if (dialog && this.getVisibleArea(dialog) > 0) {
+      return dialog;
+    }
+
+    const visibleMedia = this.getCurrentStoryMedia(document).media;
+    if (!visibleMedia) {
+      return document;
+    }
+
+    let current = visibleMedia.parentElement;
+    let bestMatch = visibleMedia.parentElement || document;
+    let bestScore = -1;
+
+    while (current && current !== document.body) {
+      const rect = current.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        current = current.parentElement;
+        continue;
+      }
+
+      const area = this.getVisibleArea(current);
+      if (area <= 0) {
+        current = current.parentElement;
+        continue;
+      }
+
+      const hasStoryLink = Boolean(current.querySelector?.('a[href^="/stories/"]'));
+      const hasNavButton = Boolean(
+        [...current.querySelectorAll('button, div[role="button"], svg[aria-label], title')].some((node) =>
+          /\b(next|previous|prev|forward|back)\b/i.test(this.getNodeIntentText(node))
+        )
+      );
+      const hasProgress = Boolean(current.querySelector?.('div[role="progressbar"], [role="slider"][aria-label*="volume" i]'));
+      const score =
+        (hasStoryLink ? 450000 : 0) +
+        (hasNavButton ? 350000 : 0) +
+        (hasProgress ? 250000 : 0) +
+        area -
+        Math.abs(rect.width - window.innerWidth * 0.35) * 60 -
+        Math.abs(rect.height - window.innerHeight * 0.7) * 40;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestMatch = current;
+      }
+
+      current = current.parentElement;
+    }
+
+    return bestMatch || document;
+  }
+
+  extractStoryUsername(root = this.getStoryViewerRoot()) {
+    const container = root || document;
+    const storyLink = container.querySelector('a[href^="/stories/"]')?.getAttribute('href');
+    if (storyLink) {
+      const parts = storyLink.split('/').filter(Boolean);
+      if (parts[0]?.toLowerCase() === 'stories' && parts[1]) {
+        return parts[1];
+      }
+    }
+
+    const pathParts = window.location.pathname.split('/').filter(Boolean);
+    if (pathParts[0]?.toLowerCase() === 'stories' && pathParts[1]) {
+      return pathParts[1];
+    }
+
+    return this.extractUsername(container);
+  }
+
+  extractCanonicalStoryUrl(root = this.getStoryViewerRoot()) {
+    const container = root || document;
+    const storyLinks = [...container.querySelectorAll('a[href^="/stories/"]')]
+      .map((link) => link.getAttribute('href'))
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length);
+
+    return this.normalizeInstagramUrl(storyLinks[0]) || this.normalizeInstagramUrl(window.location.href);
+  }
+
+  getCurrentStoryMedia(root = this.getStoryViewerRoot()) {
+    const container = root || document;
+    const videos = [...container.querySelectorAll('video')].filter((video) => this.getVisibleArea(video) > 0);
+    if (videos.length) {
+      return { media: videos[0], mediaType: 'video' };
+    }
+
+    const images = [...container.querySelectorAll('img[src]')].filter((image) => this.getVisibleArea(image) > 0);
+    if (images.length) {
+      return { media: images[0], mediaType: 'image' };
+    }
+
+    return { media: null, mediaType: 'unknown' };
+  }
+
+  getCurrentStorySnapshot(root = this.getStoryViewerRoot()) {
+    const container = root || this.getStoryViewerRoot();
+    const username = this.extractStoryUsername(container);
+    const storyUrl = this.extractCanonicalStoryUrl(container);
+    const { media, mediaType } = this.getCurrentStoryMedia(container);
+    const mediaSrc = this.getStableMediaSrc(media) || media?.getAttribute?.('src') || null;
+    const caption = this.extractCaption(container) || null;
+    const id =
+      [storyUrl, username, mediaSrc, caption?.slice(0, 80) || ''].filter(Boolean).join('|') ||
+      this.getItemId(container, 'story');
+
+    return {
+      id,
+      root: container,
+      username,
+      storyUrl,
+      media,
+      mediaType,
+      mediaSrc,
+      caption,
+      video: mediaType === 'video' ? media : null,
+      image: mediaType === 'image' ? media : null,
+    };
+  }
+
+  async waitForCurrentStoryReady(root = this.getStoryViewerRoot()) {
+    const startedAt = Date.now();
+    const timeoutMs = 15000;
+    let lastRoot = root || null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const container = this.getStoryViewerRoot() || lastRoot;
+      if (container) {
+        lastRoot = container;
+        const snapshot = this.getCurrentStorySnapshot(container);
+        if (snapshot.mediaType === 'video' && snapshot.video) {
+          const ready = await this.waitForVideoPlayback(snapshot.video, 3500);
+          if (ready) {
+            return { ready: true, ...snapshot };
+          }
+        } else if (snapshot.mediaType === 'image' && snapshot.image?.complete && snapshot.image.naturalWidth > 0) {
+          return { ready: true, ...snapshot };
+        }
+      }
+
+      await this.wait(500, 900);
+    }
+
+    return {
+      ready: false,
+      ...this.getCurrentStorySnapshot(lastRoot),
+    };
+  }
+
+  async waitForStoryChange(previousIdentity, attempts = 12) {
+    for (let index = 0; index < attempts; index += 1) {
+      await this.wait(400, 700);
+      if (!this.isStoryViewerOpen()) {
+        return true;
+      }
+
+      const currentIdentity = this.getCurrentStorySnapshot().id;
+      if (currentIdentity && currentIdentity !== previousIdentity) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  registerStoryTree(snapshot) {
+    const username = snapshot?.username || 'unknown_user';
+    let tree = this.storyTrees.get(username);
+    if (!tree) {
+      tree = {
+        storyGroupId: `${username}|${Date.now()}|${Math.random().toString(36).slice(2, 8)}`,
+        count: 0,
+      };
+      this.storyTrees.set(username, tree);
+    }
+
+    tree.count += 1;
+    return {
+      storyGroupId: tree.storyGroupId,
+      storyGroupUser: username,
+      storyGroupIndex: tree.count,
+      storyTreePath: `${username}/${tree.count}`,
+      storyTreeDepth: 1,
+      storyGroupSeenCount: tree.count,
+    };
+  }
+
+  async pauseBeforeStoryInteraction(snapshot, token) {
+    if (!snapshot?.root || token !== this.runToken) {
+      return false;
+    }
+
+    if (snapshot.video) {
+      await this.waitForVideoPlayback(snapshot.video, 2500);
+    }
+
+    await this.mimicHumanPresence(snapshot.root);
+    await this.wait(900, 1700);
+    return true;
+  }
+
+  async finishStoryView(snapshot, token) {
+    if (!snapshot?.root || token !== this.runToken) {
+      return false;
+    }
+
+    if (snapshot.video) {
+      const startedAt = Date.now();
+      const maxWaitMs = Math.min(
+        Math.max(Number.isFinite(snapshot.video.duration) && snapshot.video.duration > 0 ? snapshot.video.duration * 1000 : 6000, 3500),
+        15000
+      );
+
+      while (token === this.runToken && Date.now() - startedAt < maxWaitMs) {
+        if (this.isVideoFinished(snapshot.video)) {
+          return true;
+        }
+
+        await this.mimicHumanPresence(snapshot.root);
+        await this.wait(700, 1100);
+      }
+
+      return true;
+    }
+
+    await this.mimicHumanPresence(snapshot.root);
+    await this.wait(1800, 3200);
+    return true;
   }
 
   getVisiblePostArticle() {
     const articles = [...document.querySelectorAll('article')];
-    return articles.find((article) => this.isVisible(article)) || articles[0] || null;
+    if (!articles.length) {
+      return null;
+    }
+
+    const viewportCenterX = window.innerWidth / 2;
+    const viewportCenterY = window.innerHeight / 2;
+    let best = null;
+    let bestScore = -1;
+
+    for (const article of articles) {
+      const area = this.getVisibleArea(article);
+      if (area <= 0) {
+        continue;
+      }
+
+      const rect = article.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const distance = Math.hypot(centerX - viewportCenterX, centerY - viewportCenterY);
+      const hasMedia = Boolean(article.querySelector('img[src], video'));
+      const hasActions = Boolean(this.findLikeButton(article) || article.querySelector('[role="button"], button'));
+
+      const score = area + (hasMedia ? 150000 : 0) + (hasActions ? 50000 : 0) - distance * 120;
+      if (score > bestScore) {
+        bestScore = score;
+        best = article;
+      }
+    }
+
+    return best || articles[0] || null;
+  }
+
+  getCurrentPostSnapshot(root = this.getVisiblePostArticle()) {
+    const article = root || this.getVisiblePostArticle();
+    if (!article) {
+      return {
+        id: null,
+        article: null,
+        canonicalUrl: null,
+        video: null,
+        image: null,
+        mediaType: 'unknown',
+      };
+    }
+
+    const video = article.querySelector('video');
+    const image = article.querySelector('img[src]');
+    return {
+      id: this.extractCanonicalPostUrl(article, 'post') || this.getItemId(article, 'post'),
+      article,
+      canonicalUrl: this.extractCanonicalPostUrl(article, 'post'),
+      video,
+      image,
+      mediaType: video ? 'video' : image ? 'image' : 'unknown',
+    };
+  }
+
+  isPostReady(article) {
+    if (!article || this.getVisibleArea(article) <= 0) {
+      return false;
+    }
+
+    const video = article.querySelector('video');
+    if (video) {
+      const videoReady = video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
+      const hasActions = Boolean(this.findLikeButton(article) || this.isAlreadyLiked(article));
+      return videoReady && hasActions;
+    }
+
+    const images = [...article.querySelectorAll('img[src]')];
+    if (images.length) {
+      const visibleImage = images.find((img) => this.getVisibleArea(img) > 0) || images[0];
+      const imageReady = Boolean(visibleImage?.complete && visibleImage.naturalWidth > 0);
+      const hasActions = Boolean(this.findLikeButton(article) || this.isAlreadyLiked(article));
+      return imageReady && hasActions;
+    }
+
+    return false;
+  }
+
+  async waitForVisiblePostReady(root = this.getVisiblePostArticle()) {
+    const startedAt = Date.now();
+    const timeoutMs = 15000;
+    let lastArticle = root || null;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const article = this.getVisiblePostArticle() || lastArticle;
+      if (article) {
+        lastArticle = article;
+        article.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+        if (this.isPostReady(article)) {
+          return {
+            ready: true,
+            ...this.getCurrentPostSnapshot(article),
+          };
+        }
+      }
+
+      await this.wait(500, 900);
+    }
+
+    return {
+      ready: false,
+      ...this.getCurrentPostSnapshot(lastArticle),
+    };
+  }
+
+  async watchCurrentPostMedia(postState, token) {
+    const article = postState?.article;
+    if (!article || token !== this.runToken) {
+      return false;
+    }
+
+    const video = article.querySelector('video');
+    if (video) {
+      this.sendStatusMessage('Waiting for post video to finish...');
+      await this.waitForVideoPlayback(video, 5000);
+
+      const maxWatchMs = Math.min(
+        Math.max(Number.isFinite(video.duration) && video.duration > 0 ? video.duration * 1000 + 1500 : 7000, 4500),
+        20000
+      );
+      const startedAt = Date.now();
+      let lastPresenceAt = 0;
+      let lastProgressAt = Date.now();
+      let previousTime = video.currentTime || 0;
+
+      while (token === this.runToken && Date.now() - startedAt < maxWatchMs) {
+        if (this.isVideoFinished(video)) {
+          return true;
+        }
+
+        const currentTime = video.currentTime || 0;
+        if (currentTime > previousTime + 0.05) {
+          previousTime = currentTime;
+          lastProgressAt = Date.now();
+        }
+
+        if (Date.now() - lastPresenceAt > this.randomBetween(2200, 3600)) {
+          await this.mimicHumanPresence(article);
+          lastPresenceAt = Date.now();
+        }
+
+        if (Date.now() - lastProgressAt > 4500) {
+          break;
+        }
+
+        await this.wait(500, 900);
+      }
+
+      return true;
+    }
+
+    this.sendStatusMessage('Waiting for post to fully render...');
+    await this.mimicHumanPresence(article);
+    await this.wait(2200, 4200);
+    return true;
   }
 
   getReelContainer() {
@@ -1277,12 +1883,15 @@ class InstagramAutomation {
     }
 
     if (this.currentMode === 'stories') {
-      if (window.location.pathname !== '/') {
+      if (window.location.pathname === '/' || this.isStoryPageLocation()) {
+        return true;
+      }
+
+      if (!window.location.pathname.startsWith('/stories/')) {
         this.sendStatusMessage('Opening the Instagram home feed for stories...');
         window.location.assign('https://www.instagram.com/');
         return false;
       }
-      return true;
     }
 
     if (this.currentMode === 'search') {
@@ -1304,17 +1913,38 @@ class InstagramAutomation {
   }
 
   async processPosts(token) {
-    const article = this.getVisiblePostArticle();
-    if (!article) {
+    const readyState = await this.waitForVisiblePostReady();
+    const article = readyState.article;
+    if (!article || !readyState.ready) {
       this.sendStatusMessage('Waiting for posts to load...');
       await this.wait(2000, 3000);
       return;
     }
 
-    const itemId = this.getItemId(article, 'post');
+    const canonicalUrl = readyState.canonicalUrl;
+    const itemId = readyState.id || this.getItemId(article, 'post');
+
+    if (!this.currentPostState || this.currentPostState.id !== itemId) {
+      this.currentPostState = {
+        id: itemId,
+        mediaType: readyState.mediaType,
+        viewed: false,
+      };
+    }
+
     if (!this.processedItems.has(itemId)) {
-      this.processedItems.add(itemId);
-      this.sendStatusMessage('Processing visible post...');
+      this.sendStatusMessage(
+        this.currentPostState.mediaType === 'video' ? 'Processing visible video post...' : 'Processing visible post...'
+      );
+
+      if (token !== this.runToken) {
+        return;
+      }
+
+      if (!this.currentPostState.viewed) {
+        await this.watchCurrentPostMedia(readyState, token);
+        this.currentPostState.viewed = true;
+      }
 
       if (token !== this.runToken) {
         return;
@@ -1326,6 +1956,7 @@ class InstagramAutomation {
       if (this.settings.dataScrape) {
         await this.saveScrapedData(
           this.extractPostData(article, 'post', {
+            canonicalUrl,
             automation: {
               autoLiked: Boolean(likedNow),
               autoAlreadyLiked: Boolean(alreadyLikedAtStart),
@@ -1333,10 +1964,13 @@ class InstagramAutomation {
           })
         );
       }
+
+      this.processedItems.add(itemId);
     }
 
     if (token === this.runToken) {
       await this.smoothScrollFeed();
+      this.currentPostState = null;
     }
   }
 
@@ -1430,33 +2064,98 @@ class InstagramAutomation {
   async processStories(token) {
     const viewerReady = await this.openStoryViewer();
     if (!viewerReady) {
-      this.sendStatusMessage('Waiting for story tray...');
+      this.sendStatusMessage(
+        window.location.pathname === '/' ? 'Opening top story from Instagram story tray...' : 'Waiting for story page...'
+      );
       await this.wait(2000, 3000);
       return;
     }
 
-    const root = document.querySelector('div[role="dialog"]') || document;
-    const itemId = this.getItemId(root, 'story');
+    const readyState = await this.waitForCurrentStoryReady();
+    const snapshot = this.getCurrentStorySnapshot(readyState.root || this.getStoryViewerRoot());
+    if (!readyState.ready && snapshot.mediaType === 'unknown') {
+      this.sendStatusMessage('Waiting for current story to render...');
+      await this.wait(1500, 2500);
+      return;
+    }
+
+    const itemId = snapshot.id || this.getItemId(snapshot.root, 'story');
+    if (!itemId) {
+      this.sendStatusMessage('Waiting for current story to render...');
+      await this.wait(1500, 2500);
+      return;
+    }
+
+    if (!this.currentStoryState || this.currentStoryState.id !== itemId) {
+      this.currentStoryState = {
+        id: itemId,
+        username: snapshot.username,
+        mediaType: snapshot.mediaType,
+        viewed: false,
+        liked: false,
+        alreadyLiked: false,
+        scraped: false,
+        tree: null,
+      };
+    }
+
+    this.sendStatusMessage(
+      readyState.ready
+        ? `Processing ${snapshot.mediaType === 'video' ? 'video' : 'image'} story from ${snapshot.username}...`
+        : `Waiting for ${snapshot.username}'s story to load...`
+    );
+
+    if (token !== this.runToken) {
+      return;
+    }
+
+    if (!this.currentStoryState.viewed) {
+      await this.pauseBeforeStoryInteraction(snapshot, token);
+      this.currentStoryState.viewed = true;
+    }
 
     if (!this.processedItems.has(itemId)) {
-      this.processedItems.add(itemId);
+      this.currentStoryState.tree = this.registerStoryTree(snapshot);
+      this.currentStoryState.alreadyLiked = this.isAlreadyLiked(snapshot.root);
 
-      if (this.settings.dataScrape) {
+      if (!this.currentStoryState.alreadyLiked && this.settings.autoLike) {
+        this.currentStoryState.liked = await this.likeCurrentItem(snapshot.root);
+      }
+
+      if (this.settings.dataScrape && !this.currentStoryState.scraped) {
         const storyData = {
           platform: 'instagram',
           contentType: 'story',
           timestamp: new Date().toISOString(),
-          username: this.extractUsername(root),
-          channelName: this.extractUsername(root),
-          storyUrl: window.location.href,
+          username: snapshot.username,
+          channelName: snapshot.username,
+          caption: snapshot.caption,
+          storyUrl: snapshot.storyUrl,
+          imageUrl: snapshot.mediaType === 'image' ? snapshot.mediaSrc : null,
+          videoUrl: snapshot.mediaType === 'video' ? snapshot.mediaSrc : null,
+          isVideo: snapshot.mediaType === 'video',
+          hashtags: snapshot.caption ? snapshot.caption.match(/#\w+/g) || [] : [],
+          mentions: snapshot.caption ? snapshot.caption.match(/@\w+/g) || [] : [],
+          storyItemId: itemId,
+          storyMediaType: snapshot.mediaType,
+          uniqueKey: itemId,
+          autoLiked: Boolean(this.currentStoryState.liked),
+          autoAlreadyLiked: Boolean(this.currentStoryState.alreadyLiked),
+          autoAdvanced: Boolean(this.settings.autoScroll),
+          ...this.currentStoryState.tree,
         };
-        await this.saveScrapedData(storyData);
+        this.currentStoryState.scraped = Boolean(await this.saveScrapedData(storyData));
       }
+
+      this.processedItems.add(itemId);
     }
 
-    await this.wait(3500, 6000);
+    await this.finishStoryView(snapshot, token);
     if (token === this.runToken) {
-      await this.advanceStory();
+      const moved = await this.advanceStory();
+      if (moved) {
+        this.currentStoryState = null;
+      }
     }
   }
 
@@ -1567,7 +2266,10 @@ class InstagramAutomation {
     this.searchTotal = payload.searchTotal || 0;
 
     if (!isResume) {
+      this.currentPostState = null;
+      this.currentStoryState = null;
       this.currentReelState = null;
+      this.storyTrees.clear();
       this.processedItems.clear();
       this.resetSessionStats();
     } else {
@@ -1602,7 +2304,10 @@ class InstagramAutomation {
   stop({ notify = true } = {}) {
     this.isRunning = false;
     this.runToken += 1;
+    this.currentPostState = null;
+    this.currentStoryState = null;
     this.currentReelState = null;
+    this.storyTrees.clear();
     chrome.storage.local.set({ activeSessionId: null });
 
     if (notify) {

@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
   },
   stories: {
     autoScroll: true,
+    autoLike: true,
     dataScrape: true,
   },
   search: {
@@ -84,6 +85,7 @@ const MODE_CONFIG = {
     destination: 'instagram.com',
     toggles: [
       { key: 'autoScroll', icon: '👁️', label: 'Auto Advance', desc: 'Move to the next story after a short view delay' },
+      { key: 'autoLike', icon: '❤️', label: 'Auto Like', desc: 'Like each visible story when a Like action is available' },
       { key: 'dataScrape', icon: '📊', label: 'Data Scrape', desc: 'Capture usernames and story context when available' },
     ],
   },

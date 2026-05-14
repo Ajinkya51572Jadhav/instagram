@@ -2,6 +2,10 @@ console.log('InstagramPro background service worker loaded');
 
 let currentSession = null;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function generateSessionId() {
   return `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -62,6 +66,36 @@ async function ensureContentScriptInjected(tabId) {
     target: { tabId },
     files: ['content-scripts/instagram-improved.js'],
   });
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await sleep(500 + attempt * 150);
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: 'PING' });
+      return;
+    } catch (error) {
+      if (attempt === 7) {
+        throw error;
+      }
+    }
+  }
+}
+
+async function sendMessageToInstagramTab(tabId, payload, attempts = 5) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await ensureContentScriptInjected(tabId);
+      await sleep(700 + attempt * 250);
+      return await chrome.tabs.sendMessage(tabId, payload);
+    } catch (error) {
+      lastError = error;
+      console.warn(`Retrying tab message (${attempt + 1}/${attempts}):`, error?.message || error);
+      await sleep(900 + attempt * 300);
+    }
+  }
+
+  throw lastError || new Error('Could not deliver message to Instagram tab.');
 }
 
 function createAutomationPayload(session = currentSession) {
@@ -109,15 +143,7 @@ async function dispatchSessionToTab(tabId, force = false) {
     return;
   }
 
-  await ensureContentScriptInjected(tabId);
-  if (currentSession !== session) {
-    return;
-  }
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  if (currentSession !== session) {
-    return;
-  }
-  await chrome.tabs.sendMessage(tabId, payload);
+  await sendMessageToInstagramTab(tabId, payload);
 
   if (currentSession !== session) {
     return;
