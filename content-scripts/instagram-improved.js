@@ -66,24 +66,86 @@ class InstagramAutomation {
     try {
       chrome.runtime.sendMessage(message);
     } catch (error) {
-      console.warn('Failed to send runtime message:', error);
+      const errorMsg = error?.message || String(error);
+      console.warn('Failed to send runtime message:', errorMsg);
+      
+      // Detect extension context invalidation
+      if (errorMsg.includes('Extension context invalidated') || errorMsg.includes('message port closed')) {
+        console.error('Extension was reloaded or updated. Stopping automation.');
+        this.isRunning = false;
+        this.runToken += 1;
+        
+        // Show user-friendly message on page
+        const notification = document.createElement('div');
+        notification.style.cssText = `
+          position: fixed;
+          top: 20px;
+          right: 20px;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+          padding: 16px 24px;
+          border-radius: 12px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+          z-index: 999999;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          font-size: 14px;
+          font-weight: 500;
+          max-width: 320px;
+          animation: slideIn 0.3s ease-out;
+        `;
+        notification.innerHTML = `
+          <div style="display: flex; align-items: center; gap: 12px;">
+            <div style="font-size: 24px;">⚠️</div>
+            <div>
+              <div style="font-weight: 600; margin-bottom: 4px;">Extension Reloaded</div>
+              <div style="font-size: 12px; opacity: 0.9;">Automation stopped. Please restart from the extension popup.</div>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(notification);
+        
+        setTimeout(() => {
+          notification.style.transition = 'opacity 0.3s ease-out';
+          notification.style.opacity = '0';
+          setTimeout(() => notification.remove(), 300);
+        }, 8000);
+        
+        return false;
+      }
     }
+    return true;
   }
 
   sendStatusMessage(message) {
     console.log('[Status]', message);
-    this.sendMessage({
+    const sent = this.sendMessage({
       type: 'STATUS_MESSAGE',
       message,
     });
+    
+    // If extension context is invalidated, stop automation
+    if (!sent && !this.isRunning) {
+      return false;
+    }
+    return true;
   }
 
   updateStats() {
-    chrome.storage.local.set({ stats: this.stats });
-    this.sendMessage({
-      type: 'STATS_UPDATE',
-      stats: this.stats,
-    });
+    try {
+      chrome.storage.local.set({ stats: this.stats });
+      this.sendMessage({
+        type: 'STATS_UPDATE',
+        stats: this.stats,
+      });
+    } catch (error) {
+      console.warn('Failed to update stats:', error);
+      // If extension context is invalidated, stop automation
+      const errorMsg = error?.message || String(error);
+      if (errorMsg.includes('Extension context invalidated') || errorMsg.includes('message port closed')) {
+        this.isRunning = false;
+        this.runToken += 1;
+      }
+    }
   }
 
   resetSessionStats() {
@@ -558,8 +620,7 @@ class InstagramAutomation {
       ...document.querySelectorAll('button, div[role="button"], span[role="button"]'),
     ];
     const seen = new Set();
-    let followCandidate = null;
-    let followBackCandidate = null;
+    const matches = [];
 
     for (const candidate of candidates) {
       const button = candidate.closest?.('button, div[role="button"], span[role="button"]') || candidate;
@@ -582,21 +643,34 @@ class InstagramAutomation {
       }
 
       if (/\bfollow back\b/.test(text)) {
-        followBackCandidate ||= button;
+        const rect = button.getBoundingClientRect?.();
+        const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+        matches.push({
+          status: 'follow',
+          button,
+          score: 2000000 + this.getVisibleArea(button) - Math.abs(centerY - window.innerHeight * 0.2) * 200,
+        });
         continue;
       }
 
       if (/(^|\s)follow(\s|$)/.test(text)) {
-        followCandidate ||= button;
+        const rect = button.getBoundingClientRect?.();
+        const centerY = rect ? rect.top + rect.height / 2 : window.innerHeight / 2;
+        const insideHeader = Boolean(button.closest('header, main header, section'));
+        matches.push({
+          status: 'follow',
+          button,
+          score:
+            (insideHeader ? 1000000 : 0) +
+            this.getVisibleArea(button) -
+            Math.abs(centerY - window.innerHeight * 0.2) * 160,
+        });
       }
     }
 
-    if (followBackCandidate) {
-      return { status: 'follow', button: followBackCandidate };
-    }
-
-    if (followCandidate) {
-      return { status: 'follow', button: followCandidate };
+    if (matches.length) {
+      matches.sort((left, right) => right.score - left.score);
+      return { status: 'follow', button: matches[0].button };
     }
 
     return { status: 'button-not-found', button: null };
@@ -615,6 +689,38 @@ class InstagramAutomation {
     }
 
     return this.getFollowButtonState();
+  }
+
+  async clickFollowButton(button) {
+    if (!button) {
+      return false;
+    }
+
+    const targets = [
+      button,
+      button.querySelector?.('div'),
+      button.querySelector?.('span'),
+      button.firstElementChild,
+      button.querySelector?.('svg'),
+    ].filter(Boolean);
+
+    for (const target of targets) {
+      target.scrollIntoView?.({ block: 'center', inline: 'center', behavior: 'smooth' });
+      await this.wait(180, 320);
+
+      const clicked = await this.clickElementReliably(target);
+      if (clicked) {
+        await this.wait(900, 1400);
+        const state = this.getFollowButtonState();
+        if (['following', 'requested'].includes(state.status)) {
+          return true;
+        }
+      }
+
+      await this.wait(250, 450);
+    }
+
+    return false;
   }
 
   extractSearchProfileData(targetUsername, result = {}) {
@@ -1358,37 +1464,109 @@ class InstagramAutomation {
     return window.location.pathname.startsWith('/stories/');
   }
 
-  getTopStoryTrayLink() {
-    const links = [...document.querySelectorAll('a[href^="/stories/"]')];
-    const matches = links
-      .map((link) => {
-        const rect = link.getBoundingClientRect?.();
-        if (!rect || rect.width <= 0 || rect.height <= 0) {
-          return null;
-        }
+  getStoryTrayItemContainer(element) {
+    const anchor = element?.closest?.('a[href^="/stories/"]') || element;
+    if (!anchor) {
+      return null;
+    }
 
-        const visibleArea = this.getVisibleArea(link);
-        if (visibleArea <= 0) {
-          return null;
-        }
+    let current = anchor;
+    let bestMatch = anchor;
+    let depth = 0;
 
-        const nearTop = rect.top < Math.max(window.innerHeight * 0.35, 260);
-        const reasonableSize = rect.width >= 36 && rect.height >= 36 && rect.width <= 180 && rect.height <= 180;
-        const href = link.getAttribute('href') || '';
-        if (!href.startsWith('/stories/') || !nearTop || !reasonableSize) {
-          return null;
-        }
+    while (current && current !== document.body && depth < 8) {
+      const rect = current.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        current = current.parentElement;
+        depth += 1;
+        continue;
+      }
 
-        const score = 1000000 + visibleArea - rect.left * 10 - Math.abs(rect.top) * 8;
-        return { link, score };
-      })
-      .filter(Boolean);
+      const storyLinkCount =
+        (current.matches?.('a[href^="/stories/"]') ? 1 : 0) + current.querySelectorAll?.('a[href^="/stories/"]').length;
+      if (depth > 0 && storyLinkCount > 1) {
+        break;
+      }
 
-    matches.sort((left, right) => right.score - left.score);
-    return matches[0]?.link || null;
+      const nearTop = rect.top < Math.max(window.innerHeight * 0.35, 260);
+      const reasonableSize = rect.width >= 36 && rect.height >= 36 && rect.width <= 220 && rect.height <= 220;
+      const hasStoryMedia = Boolean(current.querySelector?.('img, canvas'));
+      if (nearTop && reasonableSize && hasStoryMedia) {
+        bestMatch = current;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return bestMatch;
   }
 
-  getStoryTrayTarget() {
+  getStoryTrayCandidates() {
+    const links = [...document.querySelectorAll('a[href^="/stories/"]')];
+    const seen = new Set();
+    const matches = [];
+
+    for (const link of links) {
+      const href = link.getAttribute('href') || '';
+      if (!href.startsWith('/stories/')) {
+        continue;
+      }
+
+      const container = this.getStoryTrayItemContainer(link) || link;
+      const rect = container.getBoundingClientRect?.() || link.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) {
+        continue;
+      }
+
+      const visibleArea = this.getVisibleArea(container);
+      const nearTop = rect.top < Math.max(window.innerHeight * 0.35, 260);
+      const reasonableSize = rect.width >= 36 && rect.height >= 36 && rect.width <= 220 && rect.height <= 220;
+      if (visibleArea <= 0 || !nearTop || !reasonableSize) {
+        continue;
+      }
+
+      const dedupeKey = `${href}|${Math.round(rect.left)}|${Math.round(rect.top)}`;
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+
+      matches.push({
+        link,
+        container,
+        href,
+        top: rect.top,
+        left: rect.left,
+      });
+    }
+
+    matches.sort((left, right) => {
+      const rowDelta = Math.abs(left.top - right.top);
+      if (rowDelta > 18) {
+        return left.top - right.top;
+      }
+      return left.left - right.left;
+    });
+
+    return matches;
+  }
+
+  getTopStoryTrayLink(skipLive = false) {
+    const candidates = this.getStoryTrayCandidates().filter(
+      (candidate) => !skipLive || !this.isLiveStoryInTray(candidate.container)
+    );
+    return candidates[0]?.link || null;
+  }
+
+  getStoryTrayTarget(skipLive = false) {
+    const primaryCandidate = this.getStoryTrayCandidates().find(
+      (candidate) => !skipLive || !this.isLiveStoryInTray(candidate.container)
+    );
+    if (primaryCandidate?.container) {
+      return primaryCandidate.container;
+    }
+
     const rawCandidates = [
       ...document.querySelectorAll('a[href^="/stories/"]'),
       ...document.querySelectorAll('div[role="button"] a[href^="/stories/"]'),
@@ -1415,6 +1593,11 @@ class InstagramAutomation {
 
       const visibleArea = this.getVisibleArea(clickable);
       if (visibleArea <= 0) {
+        continue;
+      }
+
+      const storyContainer = this.getStoryTrayItemContainer(clickable) || clickable;
+      if (skipLive && this.isLiveStoryInTray(storyContainer)) {
         continue;
       }
 
@@ -1512,23 +1695,40 @@ class InstagramAutomation {
       return true;
     }
 
-    const topStoryLink = this.getTopStoryTrayLink();
+    // Try to find a non-live story first
+    const topStoryLink = this.getTopStoryTrayLink(true);
     if (topStoryLink) {
       const href = topStoryLink.getAttribute?.('href') || '';
       if (href.startsWith('/stories/')) {
-        this.sendStatusMessage('Opening top story from Instagram story tray...');
+        this.sendStatusMessage('Opening story from Instagram story tray...');
         window.location.assign(this.normalizeInstagramUrl(href) || `https://www.instagram.com${href}`);
         return false;
       }
     }
 
-    const clickable = this.getStoryTrayTarget();
+    // If no non-live story found, check if all stories are live
+    const anyStoryLink = this.getTopStoryTrayLink(false);
+    if (anyStoryLink && !topStoryLink) {
+      this.sendStatusMessage('All visible stories are LIVE. Waiting for non-live stories...');
+      await this.wait(3000, 5000);
+      return false;
+    }
+
+    const clickable = this.getStoryTrayTarget(true);
 
     if (!clickable && !topStoryLink) {
       return false;
     }
 
     if (clickable) {
+      // Check if it's a live story before clicking
+      const storyContainer = clickable.closest('div, li, article') || clickable;
+      if (this.isLiveStoryInTray(storyContainer)) {
+        this.sendStatusMessage('Story is LIVE, looking for non-live stories...');
+        await this.wait(2000, 3000);
+        return false;
+      }
+      
       await this.clickElementReliably(clickable);
       await this.wait(2200, 3400);
       if (this.isStoryViewerOpen()) {
@@ -1541,7 +1741,7 @@ class InstagramAutomation {
       clickable?.querySelector?.('a[href^="/stories/"]')?.getAttribute?.('href') ||
       '';
     if (href.startsWith('/stories/')) {
-      this.sendStatusMessage('Opening top story from story tray...');
+      this.sendStatusMessage('Opening story from story tray...');
       window.location.assign(this.normalizeInstagramUrl(href) || `https://www.instagram.com${href}`);
       return false;
     }
@@ -1708,6 +1908,7 @@ class InstagramAutomation {
     const { media, mediaType } = this.getCurrentStoryMedia(container);
     const mediaSrc = this.getStableMediaSrc(media) || media?.getAttribute?.('src') || null;
     const caption = this.extractCaption(container) || null;
+    const isLive = this.isLiveStory(container);
     const id =
       [storyUrl, username, mediaSrc, caption?.slice(0, 80) || ''].filter(Boolean).join('|') ||
       this.getItemId(container, 'story');
@@ -1723,7 +1924,85 @@ class InstagramAutomation {
       caption,
       video: mediaType === 'video' ? media : null,
       image: mediaType === 'image' ? media : null,
+      isLive,
     };
+  }
+
+  isLiveStory(root = this.getStoryViewerRoot()) {
+    const container = root || this.getStoryViewerRoot() || document;
+    
+    // Check for LIVE badge with the exact Instagram structure
+    const liveBadges = container.querySelectorAll('span.x972fbf, span[class*="x972fbf"]');
+    for (const badge of liveBadges) {
+      const text = badge.textContent?.trim();
+      if (text === 'LIVE' || text === 'Live') {
+        return true;
+      }
+    }
+    
+    // Check for any span with LIVE text
+    const allSpans = container.querySelectorAll('span');
+    for (const span of allSpans) {
+      const text = span.textContent?.trim();
+      if (text === 'LIVE') {
+        // Verify it's styled like a badge (has padding and border-radius)
+        const style = window.getComputedStyle(span);
+        if (style.padding !== '0px' || style.borderRadius !== '0px') {
+          return true;
+        }
+      }
+    }
+    
+    // Check for live indicator in story tray (before opening)
+    const storyRings = document.querySelectorAll('canvas[style*="linear-gradient"]');
+    for (const ring of storyRings) {
+      const parent = ring.closest('div');
+      if (parent && parent.textContent?.includes('LIVE')) {
+        return true;
+      }
+    }
+    
+    // Check URL for live story indicators
+    const url = window.location.href;
+    const hasLiveUrl = url.includes('/live/') || url.includes('live_broadcast');
+    
+    return hasLiveUrl;
+  }
+
+  isLiveStoryInTray(storyElement) {
+    if (!storyElement) {
+      return false;
+    }
+    
+    let current = storyElement;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 4) {
+      const storyLinkCount =
+        (current.matches?.('a[href^="/stories/"]') ? 1 : 0) + current.querySelectorAll?.('a[href^="/stories/"]').length;
+      if (depth > 0 && storyLinkCount > 1) {
+        break;
+      }
+
+      const badgeNodes = current.querySelectorAll?.('span, div');
+      for (const badge of badgeNodes || []) {
+        const text = badge.textContent?.replace(/\s+/g, ' ').trim();
+        const label = badge.getAttribute?.('aria-label')?.replace(/\s+/g, ' ').trim();
+        if (text === 'LIVE' || text === 'Live' || label === 'LIVE' || label === 'Live') {
+          return true;
+        }
+      }
+
+      const containerText = current.textContent?.replace(/\s+/g, ' ').trim() || '';
+      if (/\blive\b/i.test(containerText) && current.querySelector?.('img, canvas')) {
+        return true;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return false;
   }
 
   async waitForCurrentStoryReady(root = this.getStoryViewerRoot()) {
@@ -2217,6 +2496,20 @@ class InstagramAutomation {
 
     const readyState = await this.waitForCurrentStoryReady();
     const snapshot = this.getCurrentStorySnapshot(readyState.root || this.getStoryViewerRoot());
+    
+    // Skip live stories immediately
+    if (snapshot.isLive) {
+      this.sendStatusMessage(`Skipping LIVE story from ${snapshot.username}...`);
+      await this.wait(800, 1200);
+      if (token === this.runToken) {
+        const moved = await this.advanceStory();
+        if (moved) {
+          this.currentStoryState = null;
+        }
+      }
+      return;
+    }
+    
     if (!readyState.ready && snapshot.mediaType === 'unknown') {
       this.sendStatusMessage('Waiting for current story to render...');
       await this.wait(1500, 2500);
@@ -2329,9 +2622,15 @@ class InstagramAutomation {
       return { success: false, reason: 'profile-unavailable' };
     }
 
-    const initialState = this.getFollowButtonState();
+    let initialState = this.getFollowButtonState();
     if (['following', 'requested'].includes(initialState.status)) {
       return { success: false, reason: initialState.status };
+    }
+
+    if (initialState.status !== 'follow' || !initialState.button) {
+      this.getSearchProfileRoot()?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+      await this.wait(700, 1200);
+      initialState = this.getFollowButtonState();
     }
 
     if (initialState.status !== 'follow' || !initialState.button) {
@@ -2344,7 +2643,14 @@ class InstagramAutomation {
       return { success: false, reason: 'cancelled' };
     }
 
-    const clicked = this.safeClick(initialState.button);
+    let clicked = await this.clickFollowButton(initialState.button);
+    if (!clicked) {
+      await this.wait(500, 900);
+      const retryState = this.getFollowButtonState();
+      if (retryState.status === 'follow' && retryState.button) {
+        clicked = await this.clickFollowButton(retryState.button);
+      }
+    }
     if (!clicked) {
       return { success: false, reason: 'follow-click-failed' };
     }
@@ -2413,6 +2719,14 @@ class InstagramAutomation {
       return;
     }
 
+    // Add human behavior delay at start - wait for page to fully render
+    this.sendStatusMessage('Waiting for page to fully load...');
+    await this.wait(3000, 5000);
+    
+    if (token !== this.runToken) {
+      return;
+    }
+
     if (this.currentMode === 'search') {
       await this.processSearch(token);
       return;
@@ -2420,6 +2734,12 @@ class InstagramAutomation {
 
     while (this.isRunning && token === this.runToken) {
       try {
+        // Check if extension context is still valid
+        if (!this.isRunning) {
+          this.sendStatusMessage('Automation stopped due to extension reload.');
+          break;
+        }
+        
         if (this.currentMode === 'posts') {
           await this.processPosts(token);
         } else if (this.currentMode === 'reels') {
@@ -2431,6 +2751,15 @@ class InstagramAutomation {
         await this.wait(1500, 2500);
       } catch (error) {
         console.error('Automation loop error:', error);
+        const errorMsg = error?.message || String(error);
+        
+        // Stop if extension context is invalidated
+        if (errorMsg.includes('Extension context invalidated') || errorMsg.includes('message port closed')) {
+          this.isRunning = false;
+          this.sendStatusMessage('Extension was reloaded. Please restart automation.');
+          break;
+        }
+        
         this.sendStatusMessage('Encountered a page error, retrying...');
         await this.wait(3000, 5000);
       }

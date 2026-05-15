@@ -1,19 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   Activity,
-  ChevronRight,
   Download,
   Film,
-  Gauge,
   Image,
   MessageCircle,
   Pause,
   Play,
   RotateCcw,
   Search,
-  ShieldCheck,
-  Sparkles,
   Settings as SettingsIcon,
   Upload,
 } from 'lucide-react';
@@ -105,6 +101,59 @@ const MODE_CONFIG = {
   },
 };
 
+const LEGAL_DOCUMENTS = {
+  privacy: {
+    title: 'Privacy Policy',
+    sections: [
+      {
+        heading: 'Overview',
+        body:
+          'InstagramPro is an Instagram productivity toolkit with reels scrolling, engagement insights, profile tools, and workflow automation.',
+      },
+      {
+        heading: 'What We Store',
+        body:
+          'The extension stores your selected settings, progress details, and exported records locally on your device so the enabled workflow features can keep working between sessions.',
+      },
+      {
+        heading: 'How Data Is Used',
+        body:
+          'Visible Instagram page information is used only for the productivity, engagement tools, and creator tools that you choose to enable inside the extension.',
+      },
+      {
+        heading: 'User Control',
+        body:
+          'You control when features start, stop, reset, and export. You are responsible for using the extension in a way that follows Instagram rules and your local laws.',
+      },
+    ],
+  },
+  terms: {
+    title: 'Terms & Conditions',
+    sections: [
+      {
+        heading: 'Accepted Use',
+        body:
+          'InstagramPro is provided for productivity, workflow support, engagement tools, and creator tools on Instagram accounts that you are authorized to manage.',
+      },
+      {
+        heading: 'Responsible Use',
+        body:
+          'Use the extension carefully and review your settings before starting any action. You remain fully responsible for account activity, platform compliance, and results.',
+      },
+      {
+        heading: 'No Guarantee',
+        body:
+          'Instagram interface changes, account limits, or network issues may affect how features perform. Some actions may pause, retry, or require manual review.',
+      },
+      {
+        heading: 'Local Records',
+        body:
+          'Any exported records or saved settings remain under your control on your device unless you choose to move or share them yourself.',
+      },
+    ],
+  },
+};
+
 function mergeModeSettings(savedSettings) {
   const next = { ...DEFAULT_SETTINGS };
   Object.keys(DEFAULT_SETTINGS).forEach((mode) => {
@@ -191,6 +240,7 @@ function App() {
   const [selectedMode, setSelectedMode] = useState('posts');
   const [isRunning, setIsRunning] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeLegalDoc, setActiveLegalDoc] = useState(null);
   const [statusMessage, setStatusMessage] = useState('Ready to start.');
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [advancedSettings, setAdvancedSettings] = useState(DEFAULT_ADVANCED_SETTINGS);
@@ -201,7 +251,7 @@ function App() {
 
   useEffect(() => {
     chrome.storage.local.get(
-      ['settings', 'stats', 'advancedSettings', 'statusMessage', 'selectedMode', 'searchUsernames', 'searchFileName'],
+      ['settings', 'stats', 'advancedSettings', 'statusMessage', 'selectedMode', 'searchUsernames', 'searchFileName', 'isRunning'],
       (result) => {
         setSettings(mergeModeSettings(result.settings));
         setStats({ ...DEFAULT_STATS, ...(result.stats || {}) });
@@ -210,6 +260,10 @@ function App() {
         setSelectedMode(result.selectedMode || 'posts');
         setUsernames(Array.isArray(result.searchUsernames) ? result.searchUsernames : []);
         setCsvFile(result.searchFileName || '');
+        // Ensure isRunning is properly loaded as boolean
+        const runningState = Boolean(result.isRunning);
+        setIsRunning(runningState);
+        console.log('Popup loaded, isRunning:', runningState);
       }
     );
 
@@ -217,7 +271,10 @@ function App() {
       if (message.type === 'STATS_UPDATE') {
         setStats({ ...DEFAULT_STATS, ...(message.stats || {}) });
       } else if (message.type === 'STATUS_UPDATE') {
-        setIsRunning(Boolean(message.isRunning));
+        const running = Boolean(message.isRunning);
+        console.log('STATUS_UPDATE received, isRunning:', running);
+        setIsRunning(running);
+        chrome.storage.local.set({ isRunning: running });
       } else if (message.type === 'FOLLOW_PROGRESS') {
         setFollowProgress(message.progress || { current: 0, total: 0 });
       } else if (message.type === 'STATUS_MESSAGE') {
@@ -241,15 +298,20 @@ function App() {
   const currentSettings = settings[selectedMode];
   const enabledToggleCount = mode.toggles.filter((toggle) => Boolean(currentSettings[toggle.key])).length;
   const progressPercent = followProgress.total ? Math.round((followProgress.current / followProgress.total) * 100) : 0;
-  const statCards = useMemo(
-    () => [
-      { label: 'Scrolls', value: stats.scrolls, color: 'from-blue-500 to-cyan-500' },
-      { label: 'Likes', value: stats.likes, color: 'from-pink-500 to-rose-500' },
-      { label: 'Scraped', value: stats.scraped, color: 'from-purple-500 to-indigo-500' },
-      { label: 'Follows', value: stats.follows, color: 'from-emerald-500 to-green-500' },
-    ],
-    [stats]
-  );
+  const statCards = useMemo(() => {
+    const cards = [
+      { label: 'Scrolls', value: stats.scrolls },
+      { label: 'Likes', value: stats.likes },
+      { label: 'Scraped', value: stats.scraped },
+      { label: 'Follows', value: stats.follows },
+    ];
+
+    if (selectedMode === 'search') {
+      return cards.filter((card) => ['Scraped', 'Follows'].includes(card.label));
+    }
+
+    return cards;
+  }, [selectedMode, stats]);
 
   const persistSettings = (nextSettings) => {
     setSettings(nextSettings);
@@ -269,8 +331,10 @@ function App() {
 
   const handleStartStop = async () => {
     if (isRunning) {
+      console.log('Stopping automation...');
       await chrome.runtime.sendMessage({ type: 'STOP_SESSION' });
       setIsRunning(false);
+      chrome.storage.local.set({ isRunning: false });
       setStatusMessage('Automation stopped.');
       return;
     }
@@ -280,24 +344,36 @@ function App() {
       return;
     }
 
+    console.log('Starting automation...');
     setFollowProgress({ current: 0, total: usernames.length });
     setStatusMessage(`Opening Instagram for ${mode.label}...`);
 
-    const response = await chrome.runtime.sendMessage({
-      type: 'START_SESSION',
-      mode: selectedMode,
-      settings: currentSettings,
-      advancedSettings,
-      usernames: selectedMode === 'search' ? usernames : [],
-    });
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'START_SESSION',
+        mode: selectedMode,
+        settings: currentSettings,
+        advancedSettings,
+        usernames: selectedMode === 'search' ? usernames : [],
+      });
 
-    if (!response?.success) {
+      if (!response?.success) {
+        console.error('START_SESSION failed:', response?.error);
+        setIsRunning(false);
+        chrome.storage.local.set({ isRunning: false });
+        setStatusMessage(response?.error || 'Failed to start automation.');
+        return;
+      }
+
+      console.log('Automation started successfully');
+      setIsRunning(true);
+      chrome.storage.local.set({ isRunning: true });
+    } catch (error) {
+      console.error('Error starting automation:', error);
       setIsRunning(false);
-      setStatusMessage(response?.error || 'Failed to start automation.');
-      return;
+      chrome.storage.local.set({ isRunning: false });
+      setStatusMessage('Failed to communicate with extension. Please try again.');
     }
-
-    setIsRunning(true);
   };
 
   const handleCSVUpload = async (event) => {
@@ -384,59 +460,24 @@ function App() {
   };
 
   return (
-    <div className="relative w-[440px] overflow-hidden bg-[radial-gradient(circle_at_top,_rgba(99,102,241,0.22),_transparent_34%),linear-gradient(160deg,_#020617_0%,_#0b1120_42%,_#2e1065_100%)] p-3.5">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="absolute -left-10 top-5 h-28 w-28 rounded-full bg-fuchsia-500/20 blur-3xl" />
-        <div className="absolute right-0 top-28 h-32 w-32 rounded-full bg-cyan-400/15 blur-3xl" />
-        <div className="absolute bottom-20 left-20 h-36 w-36 rounded-full bg-violet-500/10 blur-3xl" />
+    <div className="relative flex h-[520px] w-[380px] flex-col overflow-hidden bg-[linear-gradient(160deg,_#020617_0%,_#0b1120_42%,_#1e1b4b_100%)] px-2.5 pt-2.5 pb-2">
+      <div className="relative mb-1.5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-indigo-600">
+            <Activity className="h-3.5 w-3.5 text-white" />
+          </div>
+          <h1 className="text-sm font-semibold text-white">InstagramPro</h1>
+        </div>
+        <div className={`h-2 w-2 rounded-full ${isRunning ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
       </div>
 
-      <div className="relative mb-3 rounded-[24px] border border-white/12 bg-white/[0.07] p-3.5 shadow-[0_24px_80px_rgba(2,6,23,0.55)] backdrop-blur-xl">
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-[18px] bg-gradient-to-br from-fuchsia-500 via-violet-500 to-indigo-500 shadow-[0_12px_30px_rgba(139,92,246,0.45)]">
-              <Activity className="h-6 w-6 text-white" />
-            </div>
-            <div>
-              <div className="mb-0.5 flex items-center gap-2">
-                <h1 className="text-[26px] font-semibold leading-none tracking-tight text-white">InstagramPro</h1>
-                <span className="rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-emerald-200">
-                  Live
-                </span>
-              </div>
-              <p className="max-w-[290px] text-xs leading-5 text-slate-300">
-                Smarter automation for posts, reels, stories, and search.
-              </p>
-            </div>
-          </div>
-          <div className="rounded-full border border-white/10 bg-white/5 px-2.5 py-2">
-            <div className={`h-3 w-3 rounded-full ${isRunning ? 'bg-emerald-400 shadow-[0_0_18px_rgba(74,222,128,0.9)] animate-pulse' : 'bg-slate-500'}`} />
-          </div>
-        </div>
-
-        <div className="mb-3 grid grid-cols-3 gap-2">
-          <InfoChip icon={Sparkles} label="Mode" value={mode.label} accent="violet" />
-          <InfoChip icon={ShieldCheck} label="Enabled" value={`${enabledToggleCount}/${mode.toggles.length}`} accent="emerald" />
-          <InfoChip icon={Gauge} label="State" value={isRunning ? 'Running' : 'Ready'} accent="sky" />
-        </div>
-
-        <div className="rounded-2xl border border-white/10 bg-slate-950/45 p-3">
-          <div className="mb-1.5 flex items-center justify-between">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">Status</div>
-            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[10px] font-medium text-slate-300">
-              {mode.destination}
-            </span>
-          </div>
-          <div className="text-sm leading-5 text-slate-100">{statusMessage}</div>
-        </div>
+      <div className="mb-1.5 rounded-lg border border-white/10 bg-white/[0.05] p-1.5">
+        <div className="text-[10px] text-slate-300">{statusMessage}</div>
       </div>
 
-      <section className="mb-3">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Select Mode</div>
-          <div className="text-[11px] font-medium text-slate-500">Pick the automation style</div>
-        </div>
-        <div className="grid grid-cols-4 gap-2">
+      <section className="mb-1">
+        <div className="mb-1 text-[10px] font-medium text-slate-400">Mode</div>
+        <div className="grid grid-cols-4 gap-1.5">
           {Object.entries(MODE_CONFIG).map(([modeId, config]) => {
             const Icon = config.icon;
             const isSelected = selectedMode === modeId;
@@ -445,62 +486,27 @@ function App() {
                 key={modeId}
                 type="button"
                 onClick={() => setSelectedMode(modeId)}
-                className={`group rounded-[20px] border p-3 text-left transition duration-200 ${
+                className={`rounded-lg border p-1.5 text-center transition ${
                   isSelected
-                    ? `border-white/20 bg-gradient-to-br ${config.color} shadow-[0_18px_40px_rgba(15,23,42,0.35)]`
-                    : 'border-white/10 bg-white/[0.06] hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.09]'
+                    ? 'border-violet-400/40 bg-violet-500/20'
+                    : 'border-white/10 bg-white/[0.05] hover:bg-white/[0.08]'
                 }`}
               >
-                <div className="mb-2 flex items-start justify-between">
-                  <div
-                    className={`flex h-10 w-10 items-center justify-center rounded-2xl ${
-                      isSelected ? 'bg-white/15 text-white' : 'bg-slate-900/70 text-slate-300'
-                    }`}
-                  >
-                    <Icon className="h-5 w-5" />
-                  </div>
-                </div>
-                <div className={`text-sm font-semibold ${isSelected ? 'text-white' : 'text-slate-100'}`}>{config.label}</div>
-                <div className={`mt-1 text-[10px] ${isSelected ? 'text-white/85' : 'text-slate-400'}`}>{config.toggles.length} tools</div>
-                <div className={`mt-1 flex items-center gap-1 text-[10px] font-medium ${isSelected ? 'text-white/90' : 'text-slate-500'}`}>
-                  Open
-                  <ChevronRight className={`h-3 w-3 transition ${isSelected ? 'translate-x-0.5' : 'group-hover:translate-x-0.5'}`} />
-                </div>
+                <Icon className={`h-4 w-4 mx-auto mb-0.5 ${isSelected ? 'text-violet-300' : 'text-slate-400'}`} />
+                <div className={`text-[10px] font-medium ${isSelected ? 'text-white' : 'text-slate-300'}`}>{config.label}</div>
               </button>
             );
           })}
         </div>
       </section>
 
-      <section className="mb-3 rounded-[24px] border border-white/12 bg-white/[0.06] p-3.5 shadow-[0_18px_40px_rgba(15,23,42,0.3)] backdrop-blur-xl">
-        <div className="mb-3 flex items-start justify-between gap-3">
-          <div>
-            <div className="mb-0.5 text-base font-semibold text-white">{mode.label}</div>
-            <div className="text-[11px] leading-4 text-slate-300">{mode.description}</div>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-right">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Enabled</div>
-            <div className="text-sm font-semibold text-white">{enabledToggleCount}</div>
-          </div>
+      <section className="mb-1 rounded-lg border border-white/10 bg-white/[0.05] p-2">
+        <div className="mb-1 flex items-center justify-between">
+          <div className="text-xs font-medium text-white">{mode.label}</div>
+          <div className="text-[9px] text-slate-400">{enabledToggleCount}/{mode.toggles.length}</div>
         </div>
 
-        <div className="mb-3 rounded-2xl border border-violet-400/20 bg-gradient-to-r from-violet-500/12 to-fuchsia-500/12 p-2.5 text-[11px] text-violet-100">
-          Formula: <span className="font-semibold">Open</span>
-          {' -> '}
-          <span className="font-semibold">Wait</span>
-          {' -> '}
-          <span className="font-semibold">Action</span>
-          {' -> '}
-          <span className="font-semibold">Save</span>
-          {' -> '}
-          <span className="font-semibold">Move Next</span>
-        </div>
-
-        <div className="mb-3 rounded-2xl border border-white/10 bg-slate-950/35 p-2.5 text-[11px] leading-4 text-slate-300">
-          Start flow: open Instagram, go to <span className="font-semibold text-white">{mode.destination}</span>, then run the enabled actions below.
-        </div>
-
-        <div className="space-y-2">
+        <div className="space-y-1">
           {mode.toggles.map((toggle) => (
             <ToggleControl
               key={toggle.key}
@@ -513,16 +519,20 @@ function App() {
           ))}
         </div>
 
+        {selectedMode === 'stories' && (
+          <div className="mt-1 rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1">
+            <div className="text-[9px] font-medium uppercase tracking-[0.18em] text-red-300">Live Story Note</div>
+            <div className="mt-0.5 text-[9px] leading-3.5 text-red-100">
+              If LIVE comes first, open a normal story manually, then start.
+            </div>
+          </div>
+        )}
+
         {selectedMode === 'search' && (
-          <div className="mt-3 rounded-[20px] border border-emerald-400/15 bg-gradient-to-br from-emerald-500/10 to-cyan-500/5 p-3">
-            <div className="mb-2 flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-300">
-                <Upload className="h-5 w-5" />
-              </div>
-              <div>
-                <div className="text-sm font-medium text-white">Upload usernames</div>
-                <div className="text-[11px] text-slate-400">CSV, TXT, XLS, XLSX</div>
-              </div>
+          <div className="mt-1.5 rounded-lg border border-emerald-400/20 bg-emerald-500/10 p-1.5">
+            <div className="mb-1 flex items-center gap-1.5">
+              <Upload className="h-3 w-3 text-emerald-300" />
+              <div className="text-[10px] font-medium text-white">Upload</div>
             </div>
 
             <input
@@ -534,34 +544,27 @@ function App() {
             />
             <label
               htmlFor="search-upload"
-              className="block cursor-pointer rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-500 px-3 py-2.5 text-center text-sm font-medium text-white shadow-[0_12px_28px_rgba(16,185,129,0.3)] transition hover:from-emerald-400 hover:to-teal-400"
+              className="block cursor-pointer rounded-md bg-emerald-600 px-2 py-1 text-center text-[10px] font-medium text-white hover:bg-emerald-500"
             >
               {csvFile || 'Choose File'}
             </label>
 
-            <div className="mt-2 flex items-center justify-between text-[11px]">
-              <span className="text-slate-400">Loaded usernames</span>
-              <span className="font-semibold text-emerald-300">{usernames.length}</span>
+            <div className="mt-1 flex items-center justify-between text-[9px]">
+              <span className="text-slate-300">Loaded</span>
+              <span className="font-medium text-emerald-300">{usernames.length}</span>
             </div>
 
-            {usernames.length > 0 && (
-              <div className="mt-2 rounded-2xl border border-white/10 bg-white/5 p-2.5 text-[11px] leading-4 text-slate-300">
-                Preview: {usernames.slice(0, 4).join(', ')}
-                {usernames.length > 6 ? '...' : ''}
-              </div>
-            )}
-
             {followProgress.total > 0 && (
-              <div className="mt-3">
-                <div className="mb-1.5 flex items-center justify-between text-[11px] text-slate-300">
-                  <span>Follow progress</span>
-                  <span className="font-semibold text-emerald-200">
-                    {followProgress.current} / {followProgress.total} ({progressPercent}%)
+              <div className="mt-1">
+                <div className="mb-0.5 flex items-center justify-between text-[9px]">
+                  <span className="text-slate-300">Progress</span>
+                  <span className="font-medium text-emerald-200">
+                    {followProgress.current}/{followProgress.total}
                   </span>
                 </div>
-                <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-800/80">
+                <div className="h-1 w-full overflow-hidden rounded-full bg-slate-800">
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-emerald-400 to-teal-400 transition-all"
+                    className="h-full rounded-full bg-emerald-400"
                     style={{
                       width: `${followProgress.total ? (followProgress.current / followProgress.total) * 100 : 0}%`,
                     }}
@@ -573,63 +576,81 @@ function App() {
         )}
       </section>
 
-      <section className="mb-3">
-        <div className="mb-2 flex items-center justify-between">
-          <div className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">Session Stats</div>
-          <div className="text-[11px] text-slate-500">Live numbers</div>
-        </div>
-        <div className="grid grid-cols-4 gap-2">
+      <section className="mb-1">
+        <div className="mb-1 text-[10px] font-medium text-slate-400">Stats</div>
+        <div className={`grid gap-1.5 ${selectedMode === 'search' ? 'grid-cols-2' : 'grid-cols-4'}`}>
           {statCards.map((card) => (
-            <StatCard key={card.label} label={card.label} value={card.value} color={card.color} />
+            <StatCard key={card.label} label={card.label} value={card.value} />
           ))}
         </div>
-        <div className="mt-2 rounded-[20px] border border-white/12 bg-white/[0.06] p-3">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Daily Limits</div>
-          <div className="space-y-3">
-            <LimitBar label="Likes Today" current={stats.dailyLikes || 0} max={advancedSettings.dailyLikeLimit} />
-            <LimitBar label="Follows Today" current={stats.dailyFollows || 0} max={advancedSettings.dailyFollowLimit} />
+        {selectedMode !== 'search' && (
+          <div className="mt-1 rounded-lg border border-white/10 bg-white/[0.05] p-1.5">
+            <div className="space-y-1">
+              <LimitBar label="Likes" current={stats.dailyLikes || 0} max={advancedSettings.dailyLikeLimit} />
+              <LimitBar label="Follows" current={stats.dailyFollows || 0} max={advancedSettings.dailyFollowLimit} />
+            </div>
           </div>
-        </div>
+        )}
       </section>
 
-      <section className="grid grid-cols-4 gap-2">
-        <button
-          type="button"
-          onClick={handleExport}
-          className="flex flex-col items-center justify-center gap-1.5 rounded-[20px] border border-white/10 bg-white/[0.06] py-2.5 text-white transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.1]"
-        >
-          <Download className="h-4.5 w-4.5" />
-          <span className="text-[11px] font-medium">Export</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setShowSettings(true)}
-          className="flex flex-col items-center justify-center gap-1.5 rounded-[20px] border border-white/10 bg-white/[0.06] py-2.5 text-white transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.1]"
-        >
-          <SettingsIcon className="h-4.5 w-4.5" />
-          <span className="text-[11px] font-medium">Settings</span>
-        </button>
-        <button
-          type="button"
-          onClick={handleRefreshReset}
-          className="flex flex-col items-center justify-center gap-1.5 rounded-[20px] border border-white/10 bg-white/[0.06] py-2.5 text-white transition hover:-translate-y-0.5 hover:border-white/20 hover:bg-white/[0.1]"
-        >
-          <RotateCcw className="h-4.5 w-4.5" />
-          <span className="text-[11px] font-medium">Refresh</span>
-        </button>
-        <button
-          type="button"
-          onClick={handleStartStop}
-          className={`flex flex-col items-center justify-center gap-1.5 rounded-[20px] py-2.5 text-white shadow-[0_14px_28px_rgba(88,28,135,0.28)] transition ${
-            isRunning
-              ? 'bg-red-600 hover:bg-red-500'
-              : 'bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500'
-          }`}
-        >
-          {isRunning ? <Pause className="h-4.5 w-4.5" /> : <Play className="h-4.5 w-4.5" />}
-          <span className="text-[11px] font-semibold">{isRunning ? 'Stop' : 'Start'}</span>
-        </button>
-      </section>
+      <div className="mt-auto">
+        <section className="grid grid-cols-4 gap-1.5">
+          <button
+            type="button"
+            onClick={handleExport}
+            className="flex flex-col items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/[0.05] py-1.5 text-white hover:bg-white/[0.08]"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span className="text-[10px] font-medium">Export</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            className="flex flex-col items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/[0.05] py-1.5 text-white hover:bg-white/[0.08]"
+          >
+            <SettingsIcon className="h-3.5 w-3.5" />
+            <span className="text-[10px] font-medium">Settings</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleRefreshReset}
+            className="flex flex-col items-center justify-center gap-1 rounded-lg border border-white/10 bg-white/[0.05] py-1.5 text-white hover:bg-white/[0.08]"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            <span className="text-[10px] font-medium">Reset</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleStartStop}
+            className={`flex flex-col items-center justify-center gap-1 rounded-lg py-1.5 text-white ${
+              isRunning
+                ? 'bg-red-600 hover:bg-red-500'
+                : 'bg-violet-600 hover:bg-violet-500'
+            }`}
+          >
+            {isRunning ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+            <span className="text-[10px] font-semibold">{isRunning ? 'Stop' : 'Start'}</span>
+          </button>
+        </section>
+
+        <div className="mt-1 flex items-center justify-center gap-3 text-[9px]">
+          <button
+            type="button"
+            onClick={() => setActiveLegalDoc('privacy')}
+            className="text-slate-400 transition hover:text-violet-200"
+          >
+            Privacy Policy
+          </button>
+          <span className="text-slate-600">|</span>
+          <button
+            type="button"
+            onClick={() => setActiveLegalDoc('terms')}
+            className="text-slate-400 transition hover:text-violet-200"
+          >
+            Terms & Conditions
+          </button>
+        </div>
+      </div>
 
       {showSettings && (
         <SettingsModal
@@ -643,50 +664,38 @@ function App() {
           onClose={() => setShowSettings(false)}
         />
       )}
+
+      {activeLegalDoc && (
+        <LegalModal
+          item={LEGAL_DOCUMENTS[activeLegalDoc]}
+          onClose={() => setActiveLegalDoc(null)}
+        />
+      )}
     </div>
   );
 }
 
 function ToggleControl({ icon, label, desc, checked, onChange }) {
   return (
-    <div className="flex items-center justify-between rounded-[20px] border border-white/10 bg-white/[0.06] p-3 transition hover:border-white/20 hover:bg-white/[0.09]">
-      <div className="flex items-center gap-3">
-        <div
-          className={`flex h-9 w-9 items-center justify-center rounded-2xl text-base transition ${
-            checked
-              ? 'bg-gradient-to-br from-violet-500/80 to-fuchsia-500/80 text-white shadow-[0_12px_24px_rgba(139,92,246,0.35)]'
-              : 'bg-slate-800/80 text-slate-300'
-          }`}
-        >
-          {icon}
-        </div>
-        <div>
-          <div className="flex items-center gap-2">
-            <div className="text-sm font-medium text-white">{label}</div>
-            <span
-              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${
-                checked ? 'bg-emerald-400/15 text-emerald-200' : 'bg-slate-700/70 text-slate-400'
-              }`}
-            >
-              {checked ? 'On' : 'Off'}
-            </span>
-          </div>
-          <div className="text-[11px] leading-4 text-slate-400">{desc}</div>
-        </div>
+    <div className="flex items-center justify-between rounded-md border border-white/10 bg-white/[0.04] px-2 py-1">
+      <div className="flex items-center gap-1.5">
+        <div className="text-xs">{icon}</div>
+        <div className="text-[10px] font-medium text-white">{label}</div>
       </div>
       <button
         type="button"
         onClick={onChange}
         aria-pressed={checked}
-        className={`relative h-8 w-14 rounded-full border transition ${
+        aria-label={label}
+        className={`relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full border transition-colors duration-200 ${
           checked
-            ? 'border-violet-300/30 bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-[0_10px_22px_rgba(139,92,246,0.45)]'
-            : 'border-white/10 bg-slate-700/90'
+            ? 'border-violet-300/40 bg-violet-500 shadow-[0_0_0_1px_rgba(139,92,246,0.15)]'
+            : 'border-white/10 bg-slate-700'
         }`}
       >
         <span
-          className={`absolute top-1 flex h-6 w-6 items-center justify-center rounded-full bg-white text-[9px] font-bold text-slate-900 shadow-md transition ${
-            checked ? 'translate-x-7' : 'translate-x-1'
+          className={`pointer-events-none absolute left-0.5 h-4 w-4 rounded-full bg-white shadow-[0_1px_4px_rgba(15,23,42,0.45)] transition-transform duration-200 ${
+            checked ? 'translate-x-4' : 'translate-x-0'
           }`}
         />
       </button>
@@ -694,11 +703,11 @@ function ToggleControl({ icon, label, desc, checked, onChange }) {
   );
 }
 
-function StatCard({ label, value, color }) {
+function StatCard({ label, value }) {
   return (
-    <div className={`rounded-[20px] bg-gradient-to-br ${color} p-2.5 text-center shadow-[0_16px_30px_rgba(15,23,42,0.28)]`}>
-      <div className="text-[24px] font-bold leading-none text-white">{value}</div>
-      <div className="mt-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-white/80">{label}</div>
+    <div className="rounded-lg border border-white/10 bg-white/[0.05] p-1.5 text-center">
+      <div className="text-sm font-semibold text-white">{value}</div>
+      <div className="text-[9px] font-medium text-slate-400">{label}</div>
     </div>
   );
 }
@@ -709,15 +718,15 @@ function LimitBar({ label, current, max }) {
 
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-[11px]">
+      <div className="mb-0.5 flex items-center justify-between text-[9px]">
         <span className="text-slate-300">{label}</span>
-        <span className={isNearLimit ? 'font-semibold text-red-400' : 'font-semibold text-emerald-300'}>
-          {current} / {max}
+        <span className={isNearLimit ? 'font-medium text-red-400' : 'font-medium text-emerald-300'}>
+          {current}/{max}
         </span>
       </div>
-      <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-700/80">
+      <div className="h-1 w-full overflow-hidden rounded-full bg-slate-700">
         <div
-          className={`h-full rounded-full transition-all ${isNearLimit ? 'bg-gradient-to-r from-red-500 to-rose-400' : 'bg-gradient-to-r from-emerald-400 to-cyan-400'}`}
+          className={`h-full rounded-full ${isNearLimit ? 'bg-red-500' : 'bg-emerald-400'}`}
           style={{ width: `${percentage}%` }}
         />
       </div>
@@ -748,21 +757,15 @@ function SettingsModal({ settings, onSave, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,_rgba(15,23,42,0.98),_rgba(51,24,88,0.96))] p-6 shadow-[0_24px_90px_rgba(2,6,23,0.7)]">
-        <div className="mb-4 flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-semibold text-white">Advanced Settings</h2>
-            <div className="text-xs text-slate-400">Tune speed, safety, and usage limits.</div>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] uppercase tracking-[0.18em] text-slate-300">
-            Control
-          </div>
+      <div className="max-h-[500px] w-full max-w-sm overflow-y-auto rounded-xl border border-white/10 bg-[#0b1120] p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white">Advanced Settings</h2>
         </div>
 
-        <div className="space-y-4">
-          <div className="rounded-[24px] border border-white/10 bg-white/[0.06] p-4">
-            <div className="mb-3 text-sm font-semibold text-white">Timing</div>
-            <div className="space-y-3">
+        <div className="space-y-3">
+          <div className="rounded-lg border border-white/10 bg-white/[0.05] p-3">
+            <div className="mb-2 text-xs font-medium text-white">Timing</div>
+            <div className="space-y-2">
               <NumberRangeField
                 label="Scroll Delay (ms)"
                 min={localSettings.scrollDelay.min}
@@ -780,9 +783,9 @@ function SettingsModal({ settings, onSave, onClose }) {
             </div>
           </div>
 
-          <div className="rounded-[24px] border border-white/10 bg-white/[0.06] p-4">
-            <div className="mb-3 text-sm font-semibold text-white">Safety</div>
-            <div className="space-y-3">
+          <div className="rounded-lg border border-white/10 bg-white/[0.05] p-3">
+            <div className="mb-2 text-xs font-medium text-white">Safety</div>
+            <div className="space-y-2">
               <NumberField
                 label="Daily Like Limit"
                 value={localSettings.dailyLikeLimit}
@@ -802,18 +805,18 @@ function SettingsModal({ settings, onSave, onClose }) {
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-2 gap-3">
+        <div className="mt-4 grid grid-cols-2 gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[24px] border border-white/10 bg-white/[0.06] py-3 text-sm font-medium text-white transition hover:bg-white/[0.1]"
+            className="rounded-lg border border-white/10 bg-white/[0.05] py-2 text-xs font-medium text-white hover:bg-white/[0.08]"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={() => onSave(localSettings)}
-            className="rounded-[24px] bg-gradient-to-r from-fuchsia-600 to-violet-600 py-3 text-sm font-medium text-white transition hover:from-fuchsia-500 hover:to-violet-500"
+            className="rounded-lg bg-violet-600 py-2 text-xs font-medium text-white hover:bg-violet-500"
           >
             Save
           </button>
@@ -823,23 +826,57 @@ function SettingsModal({ settings, onSave, onClose }) {
   );
 }
 
+function LegalModal({ item, onClose }) {
+  if (!item) {
+    return null;
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="max-h-[500px] w-full max-w-sm overflow-y-auto rounded-xl border border-white/10 bg-[#0b1120] p-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-white">{item.title}</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-white/10 bg-white/[0.05] px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-white/[0.08]"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="space-y-2.5">
+          {item.sections.map((section) => (
+            <div key={section.heading} className="rounded-lg border border-white/10 bg-white/[0.05] p-3">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-violet-200">
+                {section.heading}
+              </div>
+              <div className="text-[11px] leading-5 text-slate-200">{section.body}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function NumberRangeField({ label, min, max, onMinChange, onMaxChange }) {
   return (
     <div>
-      <label className="mb-1 block text-xs text-slate-300">{label}</label>
-      <div className="grid grid-cols-2 gap-2">
+      <label className="mb-1 block text-[10px] text-slate-300">{label}</label>
+      <div className="grid grid-cols-2 gap-1.5">
         <input
           type="number"
           value={min}
           onChange={(event) => onMinChange(event.target.value)}
-          className="rounded-2xl border border-white/10 bg-slate-800/90 px-3 py-2.5 text-sm text-white outline-none transition focus:border-violet-400/60 focus:ring-2 focus:ring-violet-500/20"
+          className="rounded-lg border border-white/10 bg-slate-800 px-2 py-1.5 text-xs text-white outline-none focus:border-violet-400"
           placeholder="Min"
         />
         <input
           type="number"
           value={max}
           onChange={(event) => onMaxChange(event.target.value)}
-          className="rounded-2xl border border-white/10 bg-slate-800/90 px-3 py-2.5 text-sm text-white outline-none transition focus:border-violet-400/60 focus:ring-2 focus:ring-violet-500/20"
+          className="rounded-lg border border-white/10 bg-slate-800 px-2 py-1.5 text-xs text-white outline-none focus:border-violet-400"
           placeholder="Max"
         />
       </div>
@@ -850,31 +887,13 @@ function NumberRangeField({ label, min, max, onMinChange, onMaxChange }) {
 function NumberField({ label, value, onChange }) {
   return (
     <div>
-      <label className="mb-1 block text-xs text-slate-300">{label}</label>
+      <label className="mb-1 block text-[10px] text-slate-300">{label}</label>
       <input
         type="number"
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-2xl border border-white/10 bg-slate-800/90 px-3 py-2.5 text-sm text-white outline-none transition focus:border-violet-400/60 focus:ring-2 focus:ring-violet-500/20"
+        className="w-full rounded-lg border border-white/10 bg-slate-800 px-2 py-1.5 text-xs text-white outline-none focus:border-violet-400"
       />
-    </div>
-  );
-}
-
-function InfoChip({ icon: Icon, label, value, accent = 'violet' }) {
-  const accentClasses = {
-    violet: 'from-violet-500/20 to-fuchsia-500/10 text-violet-100',
-    emerald: 'from-emerald-500/20 to-teal-500/10 text-emerald-100',
-    sky: 'from-sky-500/20 to-cyan-500/10 text-sky-100',
-  };
-
-  return (
-    <div className={`rounded-2xl border border-white/10 bg-gradient-to-br ${accentClasses[accent] || accentClasses.violet} p-3`}>
-      <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-300">
-        <Icon className="h-3.5 w-3.5" />
-        {label}
-      </div>
-      <div className="text-sm font-semibold text-white">{value}</div>
     </div>
   );
 }
